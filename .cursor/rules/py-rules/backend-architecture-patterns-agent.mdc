@@ -1,0 +1,70 @@
+---
+description: 
+globs: *.py
+alwaysApply: false
+---
+# Backend Architecture Patterns for EMHASS
+
+## Critical Rules
+
+- **Modular Service Design**: Each major component (optimization, forecasting, thermal systems, EV charging) MUST be implemented as separate modules with clear interfaces
+- **Dependency Injection**: Use dependency injection patterns for configuration, logger, and shared services - never hard-code dependencies
+- **Linear Programming Abstraction**: Optimization logic MUST be separated from LP solver implementation - support multiple solvers (HiGHS, COIN-BC, GLPK)
+- **Configuration-Driven**: All system behavior MUST be configurable through JSON/YAML - avoid hardcoded values in business logic
+- **State Management**: Implement clear state persistence patterns using pickle/JSON for optimization state, model cache, and device status
+- **Error Boundary Pattern**: Each module MUST handle errors gracefully and provide meaningful error messages with context
+- **Async-Ready Design**: Design components to support future async operations - avoid blocking operations in main optimization loops
+- **Data Flow Architecture**: Follow unidirectional data flow: Data Retrieval → Forecasting → Optimization → Results → Control Commands
+- **Interface Segregation**: Define specific interfaces for each integration (HA, Weather APIs, Device Control) - don't mix concerns
+- **Factory Pattern**: Use factory patterns for creating optimization models, forecasters, and device controllers based on configuration
+
+## Examples
+
+<example>
+  ```python
+  # GOOD: Modular thermal system with clear interface
+  class ThermalSystemOptimizer:
+      def __init__(self, config: dict, logger: logging.Logger):
+          self.config = config
+          self.logger = logger
+          self.heat_sources = self._create_heat_sources()
+          self.thermal_storage = self._create_thermal_storage()
+      
+      def add_thermal_constraints(self, optimization_model: OptimizationModel) -> None:
+          """Add thermal system constraints to LP model"""
+          for source in self.heat_sources:
+              source.add_constraints(optimization_model)
+          self.thermal_storage.add_constraints(optimization_model)
+      
+      def get_optimization_variables(self) -> Dict[str, Any]:
+          """Return thermal system decision variables"""
+          return {
+              'heat_pump_power': self.heat_pump.power_var,
+              'gas_boiler_power': self.gas_boiler.power_var,
+              'thermal_buffer_soc': self.thermal_storage.soc_var
+          }
+  ```
+</example>
+
+<example type="invalid">
+  ```python
+  # BAD: Monolithic class mixing all concerns
+  class EMHASSOptimizer:
+      def optimize(self):
+          # Mixing data retrieval, forecasting, optimization, and control
+          data = requests.get("http://supervisor/core/api/history")  # Hard-coded URL
+          weather = self.get_weather()  # No interface
+          pv_forecast = weather['irradiance'] * 0.2  # Hard-coded efficiency
+          
+          # Thermal system logic mixed in optimization
+          if outdoor_temp < 0:
+              use_gas_boiler = True  # Hard-coded logic
+          
+          # EV charging mixed with optimization
+          if ev_plugged_in and departure_time > now + 8:
+              charge_ev = True
+          
+          # Direct device control mixed in
+          requests.post("http://localhost:8888/ebusd", data=commands)
+  ```
+</example>

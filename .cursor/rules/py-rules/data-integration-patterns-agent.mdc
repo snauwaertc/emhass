@@ -1,0 +1,184 @@
+---
+description: 
+globs: *.py
+alwaysApply: false
+---
+# Data Integration Patterns for EMHASS
+
+## Critical Rules
+
+- **Graceful Degradation**: ALL external API calls MUST have timeout, retry logic, and fallback mechanisms - never fail optimization due to API issues
+- **Data Validation Pipeline**: Implement comprehensive validation for all incoming data - check ranges, timestamps, units, and completeness
+- **Time Zone Consistency**: ALL timestamps MUST be handled with explicit timezone information - convert to UTC for storage, local for display
+- **Caching Strategy**: Implement multi-layer caching for forecast data (memory + disk) with configurable TTL and cache invalidation
+- **Rate Limiting**: Respect API rate limits for all external services - implement exponential backoff and request queuing
+- **Configuration Abstraction**: Sensor mappings and API configurations MUST be external - never hardcode entity IDs or API endpoints
+- **Error Context Propagation**: When data retrieval fails, provide context about which sensor/API failed and impact on optimization
+- **Data Quality Metrics**: Track and log data quality metrics - missing data percentage, forecast accuracy, API response times
+- **Async Processing**: Design data retrieval to support async operations - don't block optimization cycles waiting for external APIs
+- **State Persistence**: Implement persistent storage for critical state data (SoC, peak demand tracking, model training data)
+
+## Examples
+
+<example>
+  ```python
+  # GOOD: Robust HA data retrieval with error handling and validation
+  class HomeAssistantDataRetriever:
+      def __init__(self, config: dict, logger: logging.Logger):
+          self.config = config
+          self.logger = logger
+          self.session = self._create_session_with_retry()
+          self.cache = DataCache(ttl_seconds=300)
+      
+      async def get_sensor_data(self, sensor_entity: str, start_time: datetime, 
+                               end_time: datetime) -> pd.DataFrame:
+          """Retrieve sensor data with validation and error handling"""
+          cache_key = f"{sensor_entity}_{start_time}_{end_time}"
+          
+          # Check cache first
+          cached_data = self.cache.get(cache_key)
+          if cached_data is not None:
+              return cached_data
+          
+          try:
+              # Build API URL with proper error handling
+              api_url = self._build_history_url(sensor_entity, start_time, end_time)
+              
+              # Make request with timeout and retry
+              response = await self._make_request_with_retry(api_url)
+              
+              # Validate response structure
+              if not self._validate_response_structure(response):
+                  raise DataRetrievalError(f"Invalid response structure for {sensor_entity}")
+              
+              # Convert to DataFrame with validation
+              df = self._process_sensor_response(response, sensor_entity)
+              
+              # Validate data quality
+              validation_result = self._validate_data_quality(df, sensor_entity)
+              if not validation_result.is_valid:
+                  self.logger.warning(f"Data quality issues for {sensor_entity}: {validation_result.issues}")
+              
+              # Cache successful result
+              self.cache.set(cache_key, df)
+              
+              return df
+              
+          except requests.exceptions.Timeout:
+              self.logger.error(f"Timeout retrieving data for {sensor_entity}")
+              return self._get_fallback_data(sensor_entity, start_time, end_time)
+          except requests.exceptions.ConnectionError:
+              self.logger.error(f"Connection error for {sensor_entity}")
+              return self._get_fallback_data(sensor_entity, start_time, end_time)
+          except Exception as e:
+              self.logger.error(f"Unexpected error retrieving {sensor_entity}: {e}")
+              raise DataRetrievalError(f"Failed to retrieve {sensor_entity}") from e
+      
+      def _validate_data_quality(self, df: pd.DataFrame, sensor_name: str) -> DataQualityResult:
+          """Comprehensive data quality validation"""
+          issues = []
+          
+          # Check for missing data
+          missing_percentage = (df.isnull().sum().sum() / df.size) * 100
+          if missing_percentage > 10:
+              issues.append(f"High missing data: {missing_percentage:.1f}%")
+          
+          # Check for data range validity
+          if sensor_name in self.config['sensor_ranges']:
+              range_config = self.config['sensor_ranges'][sensor_name]
+              out_of_range = ((df < range_config['min']) | (df > range_config['max'])).sum().sum()
+              if out_of_range > 0:
+                  issues.append(f"Out of range values: {out_of_range}")
+          
+          # Check timestamp consistency
+          if not df.index.is_monotonic_increasing:
+              issues.append("Timestamps not monotonic")
+          
+          return DataQualityResult(is_valid=len(issues) == 0, issues=issues)
+      
+      def _get_fallback_data(self, sensor_entity: str, start_time: datetime, 
+                           end_time: datetime) -> pd.DataFrame:
+          """Provide fallback data when primary retrieval fails"""
+          if sensor_entity in self.config['fallback_strategies']:
+              strategy = self.config['fallback_strategies'][sensor_entity]
+              
+              if strategy == 'historical_average':
+                  return self._get_historical_average(sensor_entity, start_time, end_time)
+              elif strategy == 'last_known_value':
+                  return self._get_last_known_value(sensor_entity, start_time, end_time)
+              elif strategy == 'zero_fill':
+                  return self._create_zero_filled_series(start_time, end_time)
+          
+          # Default fallback
+          self.logger.warning(f"No fallback strategy for {sensor_entity}, using zeros")
+          return self._create_zero_filled_series(start_time, end_time)
+  
+  class WeatherForecastIntegrator:
+      def __init__(self, config: dict, logger: logging.Logger):
+          self.config = config
+          self.logger = logger
+          self.providers = self._initialize_providers()
+      
+      async def get_weather_forecast(self, hours_ahead: int = 48) -> WeatherForecast:
+          """Get weather forecast with provider fallback"""
+          for provider_name in self.config['provider_priority']:
+              try:
+                  provider = self.providers[provider_name]
+                  forecast = await provider.get_forecast(hours_ahead)
+                  
+                  # Validate forecast completeness
+                  if self._validate_forecast_completeness(forecast):
+                      self.logger.info(f"Weather forecast retrieved from {provider_name}")
+                      return forecast
+                  else:
+                      self.logger.warning(f"Incomplete forecast from {provider_name}, trying next provider")
+                      
+              except Exception as e:
+                  self.logger.warning(f"Weather provider {provider_name} failed: {e}")
+                  continue
+          
+          # All providers failed - use fallback
+          self.logger.error("All weather providers failed, using historical data")
+          return self._get_fallback_weather_forecast(hours_ahead)
+  ```
+</example>
+
+<example type="invalid">
+  ```python
+  # BAD: No error handling, hard-coded values, no validation
+  def get_ha_data():
+      # Hard-coded URL and no error handling
+      url = "http://supervisor/core/api/history/period/2024-01-01T00:00:00Z?filter_entity_id=sensor.power_load"
+      response = requests.get(url, headers={"Authorization": "Bearer " + token})
+      
+      # No response validation
+      data = response.json()[0]
+      
+      # Direct data processing without validation
+      values = []
+      for item in data:
+          values.append(float(item['state']))  # No error handling for non-numeric
+      
+      return values  # No DataFrame, no timestamps, no units
+  
+  def get_weather():
+      # No timeout, no error handling
+      weather = requests.get("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&hourly=temperature_2m")
+      
+      # No validation
+      return weather.json()['hourly']['temperature_2m']
+  
+  # Mixed data processing in optimization
+  def optimize():
+      try:
+          load_data = get_ha_data()  # Might fail
+          weather_data = get_weather()  # Might fail
+          # If either fails, entire optimization fails
+          
+          # No data quality checks
+          pv_forecast = weather_data[0] * 5.0  # Assumes first element is irradiance
+          
+      except:
+          pass  # Silent failure - optimization continues with garbage data
+  ```
+</example>

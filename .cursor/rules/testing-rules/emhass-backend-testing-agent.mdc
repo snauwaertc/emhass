@@ -1,0 +1,293 @@
+---
+description: Comprehensive testing guidelines for EMHASS backend components covering unit testing, integration testing, optimization validation, performance testing, and mock strategies. This rule should be applied when writing tests for optimization engines, data integration modules, forecasting components, device control systems, or when implementing test fixtures for complex energy management scenarios. Essential for ensuring reliability of the energy optimization system and maintaining code quality during development of advanced features.
+globs: 
+alwaysApply: false
+---
+# EMHASS Backend Testing Patterns
+
+## Critical Rules
+
+- **Optimization Test Isolation**: Each optimization test MUST use independent solver instances and clean state - never share optimization models between tests
+- **Mock External Dependencies**: ALL external API calls (HA, weather, device control) MUST be mocked - tests should never make real network requests
+- **Time-Based Test Fixtures**: Use fixed datetime fixtures for all time-dependent tests - never rely on system time or timezone
+- **Solver-Agnostic Testing**: Tests MUST work with all supported solvers (HiGHS, COIN-BC, GLPK) - parameterize solver selection
+- **Configuration Test Coverage**: Test all configuration permutations for thermal systems, EV charging, and capacity tariffs
+- **Performance Benchmarking**: Include performance tests for optimization solve times and memory usage with realistic data volumes
+- **Error Scenario Testing**: Test all error conditions - API failures, infeasible optimizations, invalid configurations
+- **Data Quality Testing**: Test data validation, missing data handling, and fallback mechanisms thoroughly
+- **Integration Test Layers**: Separate unit tests from integration tests - use different test databases/fixtures
+- **Test Data Realism**: Use realistic energy consumption patterns, weather data, and pricing for test scenarios
+
+## Examples
+
+<example>
+  ```python
+  # GOOD: Comprehensive optimization testing with proper isolation
+  import pytest
+  import pandas as pd
+  from unittest.mock import Mock, patch
+  from datetime import datetime, timezone
+  
+  class TestThermalSystemOptimization:
+      
+      @pytest.fixture
+      def thermal_config(self):
+          """Realistic thermal system configuration"""
+          return {
+              'heat_pump': {
+                  'max_power': 12000,
+                  'cop_curve': {
+                      'outdoor_temps': [-10, 0, 5, 10, 15],
+                      'cop_values': [2.0, 2.5, 3.0, 3.5, 4.0]
+                  }
+              },
+              'gas_boiler': {
+                  'max_power': 24000,
+                  'efficiency': 0.92,
+                  'min_power': 4800
+              },
+              'thermal_buffer': {
+                  'capacity_kwh': 30,
+                  'efficiency': 0.95,
+                  'min_soc': 0.2,
+                  'max_soc': 0.9
+              }
+          }
+      
+      @pytest.fixture
+      def weather_forecast(self):
+          """Fixed weather forecast for consistent testing"""
+          dates = pd.date_range('2024-01-01', periods=48, freq='30T', tz=timezone.utc)
+          return pd.DataFrame({
+              'outdoor_temp': [-5, -3, -1, 2, 4, 6] * 8,  # Realistic winter pattern
+              'irradiance': [0, 0, 0, 0, 100, 200] * 8    # Realistic solar pattern
+          }, index=dates)
+      
+      @pytest.fixture
+      def electricity_prices(self):
+          """Realistic time-of-use pricing"""
+          dates = pd.date_range('2024-01-01', periods=48, freq='30T', tz=timezone.utc)
+          # Simulate high/low price periods
+          prices = []
+          for hour in range(48):
+              if 6 <= hour % 24 <= 8 or 17 <= hour % 24 <= 20:
+                  prices.append(0.15)  # Peak hours
+              else:
+                  prices.append(0.08)  # Off-peak hours
+          return pd.Series(prices, index=dates)
+      
+      @pytest.mark.parametrize("solver_type", ["HiGHS", "COIN_BC", "GLPK"])
+      def test_thermal_optimization_all_solvers(self, thermal_config, weather_forecast, 
+                                               electricity_prices, solver_type):
+          """Test thermal optimization with all supported solvers"""
+          # Setup optimization model
+          optimizer = ThermalSystemOptimizer(thermal_config, Mock())
+          
+          # Mock external data sources
+          with patch('emhass.retrieve_hass.RetrieveHass') as mock_retrieve:
+              mock_retrieve.return_value.get_data.return_value = self._create_mock_load_data()
+              
+              # Run optimization with specific solver
+              result = optimizer.optimize(
+                  weather_forecast=weather_forecast,
+                  electricity_prices=electricity_prices,
+                  solver_type=solver_type
+              )
+          
+          # Validate optimization results
+          assert result.status == "optimal"
+          assert len(result.heat_pump_schedule) == 48
+          assert len(result.gas_boiler_schedule) == 48
+          assert all(p >= 0 for p in result.heat_pump_schedule)
+          assert all(p <= thermal_config['heat_pump']['max_power'] 
+                    for p in result.heat_pump_schedule)
+          
+          # Validate thermal constraints
+          for i, temp in enumerate(weather_forecast['outdoor_temp']):
+              expected_cop = optimizer._calculate_cop(temp)
+              thermal_output = result.heat_pump_schedule[i] * expected_cop
+              assert thermal_output >= 0  # Physical constraint
+      
+      def test_thermal_system_efficiency_constraints(self, thermal_config):
+          """Test temperature-dependent efficiency modeling"""
+          optimizer = ThermalSystemOptimizer(thermal_config, Mock())
+          
+          # Test COP calculation at different temperatures
+          test_cases = [
+              (-10, 2.0),   # Cold weather - low COP
+              (0, 2.5),     # Moderate weather
+              (15, 4.0)     # Warm weather - high COP
+          ]
+          
+          for outdoor_temp, expected_cop in test_cases:
+              calculated_cop = optimizer._calculate_cop(outdoor_temp)
+              assert abs(calculated_cop - expected_cop) < 0.1
+      
+      def test_infeasible_thermal_scenario(self, thermal_config):
+          """Test handling of infeasible thermal optimization scenarios"""
+          # Create scenario with impossible thermal demand
+          impossible_demand = [50000] * 48  # Demand exceeds all capacity
+          
+          optimizer = ThermalSystemOptimizer(thermal_config, Mock())
+          
+          with pytest.raises(OptimizationError, match="infeasible"):
+              optimizer.optimize(thermal_demand=impossible_demand)
+      
+      def test_thermal_buffer_energy_balance(self, thermal_config):
+          """Test thermal buffer state-of-charge continuity"""
+          optimizer = ThermalSystemOptimizer(thermal_config, Mock())
+          
+          # Simple scenario with known inputs
+          initial_soc = 0.5
+          heat_pump_power = [8000] * 4  # 4 periods of 8kW
+          thermal_demand = [6000] * 4   # 4 periods of 6kW demand
+          
+          result = optimizer._calculate_thermal_buffer_soc(
+              initial_soc, heat_pump_power, thermal_demand
+          )
+          
+          # Validate energy balance
+          assert len(result) == 4
+          assert all(soc >= thermal_config['thermal_buffer']['min_soc'] for soc in result)
+          assert all(soc <= thermal_config['thermal_buffer']['max_soc'] for soc in result)
+          
+          # Check energy conservation
+          efficiency = thermal_config['thermal_buffer']['efficiency']
+          for i in range(1, len(result)):
+              expected_soc = (result[i-1] + 
+                            (heat_pump_power[i] * efficiency - thermal_demand[i]) * 0.5 / 
+                            thermal_config['thermal_buffer']['capacity_kwh'])
+              assert abs(result[i] - expected_soc) < 0.01
+      
+      @patch('emhass.device_controller.EbusdClient')
+      def test_thermal_control_commands(self, mock_ebusd, thermal_config):
+          """Test thermal system control command generation"""
+          controller = ThermalDeviceController(thermal_config, Mock())
+          
+          # Test heat pump control
+          optimization_result = Mock()
+          optimization_result.heat_pump_schedule = [8500, 0, 12000]
+          optimization_result.timestamps = pd.date_range('2024-01-01', periods=3, freq='30T')
+          
+          commands = controller.generate_control_commands(optimization_result)
+          
+          # Validate command structure
+          assert len(commands) == 3
+          for i, command in enumerate(commands):
+              assert command['device'] == 'heat_pump'
+              assert command['power'] == optimization_result.heat_pump_schedule[i]
+              assert command['timestamp'] == optimization_result.timestamps[i]
+              assert 'safety_checks' in command
+      
+      def _create_mock_load_data(self):
+          """Create realistic load data for testing"""
+          dates = pd.date_range('2024-01-01', periods=48, freq='30T', tz=timezone.utc)
+          # Simulate realistic household load pattern
+          load_pattern = []
+          for hour in range(48):
+              hour_of_day = hour % 24
+              if 6 <= hour_of_day <= 8:
+                  load_pattern.append(3500)  # Morning peak
+              elif 17 <= hour_of_day <= 21:
+                  load_pattern.append(4200)  # Evening peak
+              else:
+                  load_pattern.append(2800)  # Base load
+          
+          return pd.DataFrame({'load': load_pattern}, index=dates)
+  
+  class TestDataIntegrationResilience:
+      
+      @patch('requests.get')
+      def test_ha_api_timeout_handling(self, mock_get):
+          """Test graceful handling of HA API timeouts"""
+          # Simulate timeout
+          mock_get.side_effect = requests.exceptions.Timeout()
+          
+          retriever = HomeAssistantDataRetriever(self._get_test_config(), Mock())
+          
+          # Should not raise exception, should return fallback data
+          result = retriever.get_sensor_data(
+              'sensor.power_load',
+              datetime(2024, 1, 1, tzinfo=timezone.utc),
+              datetime(2024, 1, 2, tzinfo=timezone.utc)
+          )
+          
+          assert result is not None
+          assert len(result) > 0  # Fallback data provided
+      
+      def test_data_validation_pipeline(self):
+          """Test comprehensive data validation"""
+          validator = DataValidator(self._get_validation_config())
+          
+          # Test various data quality issues
+          test_cases = [
+              # Missing data
+              pd.Series([1, 2, np.nan, 4, 5]),
+              # Out of range values
+              pd.Series([1, 2, 999999, 4, 5]),  # Unrealistic power value
+              # Non-monotonic timestamps
+              pd.Series([1, 2, 3, 4, 5], 
+                       index=[1, 2, 4, 3, 5])  # Timestamp order wrong
+          ]
+          
+          for i, test_data in enumerate(test_cases):
+              result = validator.validate_data(test_data, 'sensor.power_load')
+              assert not result.is_valid, f"Test case {i} should fail validation"
+              assert len(result.issues) > 0
+      
+      def _get_test_config(self):
+          return {
+              'hass_url': 'http://test-ha',
+              'fallback_strategies': {
+                  'sensor.power_load': 'historical_average'
+              },
+              'sensor_ranges': {
+                  'sensor.power_load': {'min': 0, 'max': 15000}
+              }
+          }
+  ```
+</example>
+
+<example type="invalid">
+  ```python
+  # BAD: Poor testing practices with shared state and no mocking
+  class TestOptimization:
+      
+      # Shared state between tests (BAD!)
+      optimizer = OptimizationEngine()
+      
+      def test_thermal_system(self):
+          # No mocking - makes real API calls (BAD!)
+          data = requests.get("http://supervisor/core/api/history")
+          weather = requests.get("https://api.open-meteo.com/v1/forecast")
+          
+          # Uses system time - non-deterministic (BAD!)
+          result = self.optimizer.optimize(start_time=datetime.now())
+          
+          # Vague assertion (BAD!)
+          assert result is not None
+          
+          # No cleanup - state persists to next test (BAD!)
+      
+      def test_ev_charging(self):
+          # Depends on previous test state (BAD!)
+          # Uses hard-coded solver (BAD!)
+          result = self.optimizer.optimize(solver="GLPK")
+          
+          # No error handling testing (BAD!)
+          assert len(result.ev_schedule) > 0
+      
+      def test_performance(self):
+          # No baseline or realistic data (BAD!)
+          start = time.time()
+          result = self.optimizer.optimize()
+          duration = time.time() - start
+          
+          # Arbitrary threshold with no justification (BAD!)
+          assert duration < 5.0
+      
+      # No test for error conditions (BAD!)
+      # No test for configuration variations (BAD!)
+      # No test isolation (BAD!)
+  ```
+</example>
