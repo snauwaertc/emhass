@@ -23,7 +23,11 @@ lpems.md
 forecasts.md
 mlforecaster.md
 mlregressor.md
+energy_price_forecasting.md
 thermal_model.md
+advanced_thermal_model.md
+optimizer_heat_source_selection.md
+ha_integration_roadmap.md
 study_case.md
 config.md
 emhass.md

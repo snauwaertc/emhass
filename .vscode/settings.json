@@ -15,7 +15,7 @@
         "automations"
     ],
     "sonarlint.connectedMode.project": {
-        "connectionId": "emhass",
+        "connectionId": "davidusb-geek",
         "projectKey": "davidusb-geek_emhass"
     },
     "sonarlint.disableTelemetry": true,

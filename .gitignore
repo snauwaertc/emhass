@@ -165,3 +165,6 @@ dmypy.json
 cython_debug/
 
 docs/EMHASS_presentation.pdf
+
+# Private individual user cursor rules
+.cursor/rules/_*.mdc
