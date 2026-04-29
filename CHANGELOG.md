@@ -1,5 +1,225 @@
 # Changelog
 
+## 0.17.2 - 2026-04-19
+### Improvement
+- Added support for deferrable load groups
+- Updated versions of workflow actions
+### Fix
+- Prevent thermal battery infeasibility when `q_input_start` is zero
+- Clean session closure to prevent aiohttp timeouts
+- Resolve `UnboundLocalError` for `inv_stress_conf` on infeasible retry
+- Fix DST-boundary crashes in forecast date range computation
+- Fix documentation for location
+- Support out-of-band initial SOC recovery in naive MPC
+
+## 0.17.1 - 2026-03-18
+### Improvement
+- Added `set_deferrable_max_startups` parameter to enforce a hard physical limit on the maximum number of times a deferrable load can be turned on during an optimization horizon, preventing unwanted chattering
+- Added new Websocket section to documentation
+- Improving coverage: MLForecaster, web server and command line utils
+- Improved automatic testing: Add tests for converting nested parameters to config, deferrable load padding, export time range parsing, NaN handling, and resampling/filtering of time series data. Add an MPC cache behavior test to verify cache hits for non-structural plant changes and cache misses for structural plant changes
+- Deactivate binary variables for non-thermal loads with 0 operating timesteps to reduce MIP solve time
+### Fix
+- Ensure cached MPC optimizers are invalidated when structural plant configuration changes while still updating runtime-dependent parameters on cache hits
+- Prevent stale internal optimization configuration by refreshing cached optimizer plant and optimization configs with latest runtime values
+- Fixed logging initialization issue
+- Fixed an issue where the REST API sends 'Bearer empty' when the token is not configured in the add-on
+- Gracefully skip days with no history data during REST API retrieval
+- Fixed Solcast API Accept header and sub-30min resampling issues
+- Fix to REST API authentication fails when token is set to "empty" in addon mode issue
+
+## 0.17.0 - 2026-02-28
+### Improvement
+- Added caching for the Optimization object to use warm start (@sokorn)
+- Add thermal inertia extension for thermal battery model (@sokorn)
+- Added parameter for relative MIP gap (@sokorn)
+- Enhance HA add-on file management to use addon_configs folder (@mime24)
+- Rename 'add-on' to 'app' (@AJediIAm)
+- Update skforecast requirement from <0.20.0,>=0.19.1 to >=0.19.1,<0.21.0 (@dependabot)
+### Fix
+- Reuse HTTP session across post_data calls (@sokorn)
+- Handle corrupted metadata.json file (@rmounce)
+- Pin cvxpy version to <1.8.0 (@rmounce)
+- Fix ruff format in retrieve_hass.py (@mime24)
+
+### ⚠️ POSSIBLE BREAKING CHANGE: HA Add-on File Management
+
+This release updates how EMHASS handles file management within Home Assistant, aligning with the new HA standard of using the dedicated `/addon_configs` folder for user-facing configuration files.
+
+* **What changed:** Configuration and data files have been migrated to the new `addon_configs` directory structure.
+* **Why it might break your setup:** If you are an advanced user who has written custom shell commands, external scripts, or backup automations that point strictly to the old hardcoded `/share/emhass` or `/config` directory paths, **those paths will likely fail** after this update.
+* **Action Required:** Please review any custom automations or scripts that read from or write to EMHASS files directly and update the paths to reflect the new `/addon_configs/` location.
+
+## 0.16.2 - 2026-01-29
+### Improvement
+- Added support for a thermal inertia parameter for the basic thermal model
+- Handle time-dependent battery weights (@rmounce)
+### Fix
+- Fix Docker signal handling with tini and pin uvicorn version (@rmounce)
+- Fix "typical" load forecast method fails with maximum_power_from_grid as vector (list)
+- Fix warning logging messages on sensor_replace_zero
+- Fix for correct handling of open-meteo temp_air variable
+
+## 0.16.1 - 2026-01-23
+### Fix
+- Hot fix for InfluxDB not passed credentials
+- Fixed optimization window size mismatch issue
+- Fixed optim_status key not found error when falling back to LP problem
+
+## 0.16.0 - 2026-01-21
+
+### 🚀 Major Optimization Engine Overhaul
+
+This release marks a significant milestone in the evolution of EMHASS. We have completely re-engineered the core optimization backend, moving from **PuLP** to **CVXPY**. This modern, vectorized architecture unlocks substantial performance improvements and paves the way for advanced energy management features.
+
+### Key Highlights
+
+* **⚡ CVXPY & Vectorization:** The constraint generation logic has been rewritten using vectorization. This mathematical streamlining allows EMHASS to construct optimization problems significantly faster, reducing overhead especially for complex configurations or long prediction horizons. Benchmarks show optimization times are 4-5x faster, clocking in at approximately 0.1s per iteration for standard use cases compared to previous implementation.
+* **🏎️ HiGHS Solver Standard:** We have adopted **HiGHS** as the new default solver. HiGHS is a state-of-the-art, open-source linear optimization solver that offers vastly superior performance and stability compared to the legacy CBC/GLPK solvers.
+* **📦 Simplified Dependencies:** No more system-level dependencies! Because HiGHS is bundled as a Python wheel, the Docker image is lighter, and installation is more robust—you no longer need to install `coinor-cbc` or `glpk` via apt.
+* **🔧 Commercial Solver Support:** Power users with licenses for **Gurobi** or **CPLEX** can now easily plug them in via environment variables (`LP_SOLVER=GUROBI`) without code modifications, thanks to the standardized interface of CVXPY.
+* **🏗️ Modular Architecture:** The optimization class has been refactored into smaller, testable helper methods, improving code maintainability and making it easier for contributors to add new constraints (like the new internal gains logic for thermal batteries) without breaking existing features.
+
+### Improvement
+- Refactor optimization.py to use cvxpy
+- Added internal gains factor to heating demand calculation (@sokorn)
+- Add vector support for maximum power to or from grid (@mk2lehe)
+
+### ⚠️ BREAKING CHANGE: Solver Configuration
+
+We have modernized the optimization backend to use CVXPY. As a result, the solver configuration has been simplified and **both** `lp_solver` and `lp_solver_path` parameters have been **removed**.
+
+* **Removed:** `lp_solver` and `lp_solver_path` are no longer supported in the configuration.
+* **New Default:** The application now defaults to the **HiGHS** solver, which is bundled directly with EMHASS. No external binary paths or apt packages are required.
+* **Commercial Solvers:** If you wish to use **Gurobi** or **CPLEX** (requiring your own license), you must now specify this using the `LP_SOLVER` environment variable (e.g., `LP_SOLVER=GUROBI`), rather than the configuration file.
+
+**Action Required:**
+
+1. **Remove** `lp_solver` and `lp_solver_path` from your configuration files (`config.json` or `options.json`) to avoid validation warnings.
+2. If you previously relied on a custom solver path, ensure you are satisfied with the new default HiGHS solver (recommended) or configure the environment variable for a commercial alternative.
+
+## 0.15.6 - 2026-01-18
+### Improvement
+- New feature that allows users to disable SSL communication with Home Assistant
+### Fix
+- Fix issues with missing `long_train_data.pkl` file and load power sensor name updated by the user
+- Fix broken MLRegressor by removing unnecessary loading of a CSV file
+- Fix missing outdoor temperature data for thermal model
+
+## 0.15.5 - 2026-01-16
+### Fix
+- Fix the thermal load parsing to use it on any type of optimization
+
+## 0.15.4 - 2026-01-13
+### Improvement
+- Support selecting PV module and inverter models by approximate power rating in addition to explicit database names
+- Introduce helper contexts and structured helpers for optimization setup, publishing, and forecast preparation
+- Add explicit SonarCloud analysis and Codecov integration in CI workflow
+- Added support to publish emhass package to conda repository
+- Improved documentation: Reorganize and expand documentation sections, including for using InfluxDB as a data source and for passing secret parameters, clarifying differences between Docker/Python deployments and the Home Assistant add-on, and moving this content into the passing_data guide. Change theme to PyData Sphinx Theme
+- Added extensive unit tests around Home Assistant data retrieval helpers, PV adjustment behavior, regressor preparation errors, weather forecast method branching, thermal loads publishing, and web server runtime parameter handling
+- Update existing optimization and CLI tests to use mocks for heavy optimization routines allowing faster tests
+### Fix
+- Ensure InfluxDB is prioritized over WebSocket and REST when configured as a data source to avoid redundant queries to Home Assistant
+- Fix runtime parameter parsing in the web server to properly handle malformed JSON payloads and default safely to empty parameters
+
+## 0.15.3 - 2026-01-07
+### Improvement
+- Added new thermal model plots
+- Implement thermal battery for underfloor heating from Langer & Volling (2020) (@sokorn)
+- Add hybrid inverter stress cost (@rmounce)
+- Introduce dynamic frontend visibility toggles for `InfluxDB` and machine-learning forecaster options in the web configuration UI
+- Greatly improved coverage for the whole project. Added a new long-awaited unit testing suite for the web server
+- Allow configuring the number of Bayesian optimization trials in the machine-learning forecaster tune API (@gieljnssns)
+- Improve logging for non-hybrid systems to clarify that `inverter_ac_input_max` is ignored and `battery_charge_power_max` is used as the charge limit
+- Expand and update configuration documentation for weather, load, load cost, and production price forecast methods, including references to dedicated forecast documentation and external data inputs
+### Fix
+- Solved issue with `historic_days_to_retrieve` not taken into account
+- Clarify initialization logging for WebSocket, InfluxDB, and REST API data retrieval modes
+- Fixed problem with missing prepare data method on MLForecaster workflow
+- Always use the configured `battery_charge_power_max` as the effective battery DC charge limit, avoiding unintended constraint tightening from `inverter_ac_input_max` on non-hybrid systems
+
+## 0.15.2 - 2025-12-19
+### Improvement
+- Update documentation and parameter definitions for adjusted PV regression models to include all available scikit-learn options (@sokorn)
+- Removed device class and unit of measurement for optim status (@mime24)
+### Fix
+- Fixing some docs math mode and rearrange sections 
+- Refactor REST API data retrieval to reuse one aiohttp ClientSession, solve issue #648 (@gieljnssns)
+- Change regressor parameter to estimator in forecaster
+- Remove warning log for runtime parameters parsing
+
+## 0.15.1 - 2025-12-09
+### Fix
+- Hot fix for thermal model semi-continuous mode and continual publish caped to 60s
+
+## 0.15.0 - 2025-12-09
+### Improvement
+- Added support for async emhass code (@gieljnssns)
+- Added support for websocket data retrieval (@gieljnssns)
+- Add feature to cache pv regression model (@sokorn)
+- Added support for a more comprehensive list of `scikit-learn` models for both ML Forecaster and Regressor classes
+- Improved documentation re-arranged sections
+- Thermal model improvements:
+	- Implemented a Min/Max temperature control, proposed by @werdnum
+	- Implemented needed unit tests
+	- Improved documentation
+### Fix
+- Fixed warning message because pickle files saved with old Numpy version
+- A buch of code refactor following SonarCloud Code Analysis 
+- Solved runtime param optimization_time_step not recognized, issue #563
+- Attempt at solving data publish problem when containing both battery sensor definitions and a def_load_config, issue #587
+- Fix timezone comparison issue with InfluxDB (@sokorn)
+- Update skforecast requirement from <0.19.0,>=0.18.0 to >=0.18.0,<0.20.0
+- Implement inverter AC input limit constraint
+
+## 0.14.1 - 2025-11-29
+### Improvement
+- Improved InfluxDB version support documentation
+- Adjust ML forecast tune lags with optizimation_time_step (@sokorn)
+- Improved documentation for MLRegressor (@sokorn)
+- Update description for semi_cont load parameter (@purcell-lab)
+### Fix
+- Refactored proposed changes for HA independent configuration
+- Fixed behavior to run EMHASS independently from HA (@Jahper)
+- Proposed solution to Maximum battery charging rate issue #613
+- Proposed solution to solve issue with missing use of split_date_delta
+
+## 0.14.0 - 2025-11-15
+### Improvement
+- Add InfluxDB integration for enhanced historical data retrieval (@scrusberghs)
+- Added SSL feature for InfluxDB (@sokorn)
+- Feature to export influxdb to csv file (@scrusberghs)
+- Improvements to timezone handling and testing, use ISO8601 date format (@Crosenhain)
+- Reduce severity of logged Open Meteo `forecast_days` minimum override message (@paulhomes)
+### Fix
+- Fix to InfluxDB query to avoid TypeError: Cannot compare tz-naive and tz-aware timestamps (@Jahper)
+- Fix InfluxDB future data query and `use_influxdb` parameter type (@scrusberghs)
+- Resolve time zone handling issues across daylight savings changes (@Squazel)
+- Fix `forecast.py` to align CSV data with prediction window (@nielskool)
+- Fix for `pytz.exceptions.NonExistentTimeError` with Open Meteo weather source during DST change (@paulhomes)
+- Fix decimal precision for `unit_load_cost` and `unit_prod_price` sensors (@scrusberghs)
+
+## 0.13.5 - 2025-09-19
+### Improvement
+- Use SVG render mode for Plotly figures (@Crosenhain)
+- Constrain PV curtailment of hybrid inverter (@rmounce)
+### Fix
+- Fix operating_timesteps_of_each_deferrable_load validation formula (@scruysberghs)
+
+## 0.13.4 - 2025-08-25
+### Improvement
+- Added support for minimum power value for each deferrable load
+- Add configuration for hybrid inverter input power limit and efficiency (@rmounce)
+- Add runtime parameter to prevent PV forecast feedback loop during curtailment (@scruysberghs)
+- Update Docker documentation for volume mounting of config.json (@cabberley)
+- Apply ruff formatting for improved code consistency (@polyfloyd)
+- Set executable permissions for `__main__` entrypoints and remove unused shebangs (@polyfloyd)
+- Correct minor typos in README documentation (@Ultimation)
+### Fix
+- Fixed naive load power forecast shifted timestamp issue #516
+- Fix Docker build for aarch64 architecture (@polyfloyd)
+
 ## 0.13.3 - 2025-05-02
 ### Improvement
 - Enhance optimization solver capabilities by adding HiGHS solver, improving thread configuration, and updating solver support across the project (@Crosenhain)

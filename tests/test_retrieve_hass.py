@@ -1,17 +1,19 @@
-#!/usr/bin/env python
-
+import _pickle as cPickle
+import asyncio
 import bz2
 import copy
 import datetime
-import json
+import os
 import pathlib
 import pickle
-import pickle as cPickle
 import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiofiles
 import numpy as np
+import orjson
 import pandas as pd
-import requests_mock
+from aioresponses import aioresponses
 
 from emhass import utils
 from emhass.retrieve_hass import RetrieveHass
@@ -32,8 +34,10 @@ emhass_conf["associations_path"] = emhass_conf["root_path"] / "data/associations
 logger, ch = get_logger(__name__, emhass_conf, save_to_file=False)
 
 
-class TestRetrieveHass(unittest.TestCase):
-    def setUp(self):
+class TestRetrieveHass(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        emhass_conf["data_path"] = root / "data/"
+
         self.get_data_from_file = True
         save_data_to_file = False
         model_type = "test_df_final"  # Options: "test_df_final" or "long_train_data"
@@ -41,38 +45,31 @@ class TestRetrieveHass(unittest.TestCase):
         # Build params with default secrets (no config)
         if emhass_conf["defaults_path"].exists():
             if self.get_data_from_file:
-                _, secrets = utils.build_secrets(emhass_conf, logger, no_response=True)
-                params = utils.build_params(emhass_conf, secrets, {}, logger)
+                _, secrets = await utils.build_secrets(emhass_conf, logger, no_response=True)
+                params = await utils.build_params(emhass_conf, secrets, {}, logger)
                 retrieve_hass_conf, _, _ = get_yaml_parse(params, logger)
             else:
                 emhass_conf["secrets_path"] = root / "secrets_emhass.yaml"
-                config = utils.build_config(
-                    emhass_conf, logger, emhass_conf["defaults_path"]
-                )
-                _, secrets = utils.build_secrets(
+                config = await utils.build_config(emhass_conf, logger, emhass_conf["defaults_path"])
+                _, secrets = await utils.build_secrets(
                     emhass_conf,
                     logger,
                     secrets_path=emhass_conf["secrets_path"],
                     no_response=True,
                 )
-                params = utils.build_params(emhass_conf, secrets, config, logger)
+                params = await utils.build_params(emhass_conf, secrets, config, logger)
                 retrieve_hass_conf, _, _ = get_yaml_parse(params, logger)
                 params = None
         else:
             raise Exception(
-                "config_defaults. does not exist in path: "
-                + str(emhass_conf["defaults_path"])
+                "config_defaults. does not exist in path: " + str(emhass_conf["defaults_path"])
             )
 
         # Force config params for testing
         retrieve_hass_conf["optimization_time_step"] = pd.to_timedelta(30, "minutes")
         retrieve_hass_conf["sensor_power_photovoltaics"] = "sensor.power_photovoltaics"
-        retrieve_hass_conf["sensor_power_photovoltaics_forecast"] = (
-            "sensor.p_pv_forecast"
-        )
-        retrieve_hass_conf["sensor_power_load_no_var_loads"] = (
-            "sensor.power_load_no_var_loads"
-        )
+        retrieve_hass_conf["sensor_power_photovoltaics_forecast"] = "sensor.p_pv_forecast"
+        retrieve_hass_conf["sensor_power_load_no_var_loads"] = "sensor.power_load_no_var_loads"
         retrieve_hass_conf["sensor_replace_zero"] = [
             "sensor.power_photovoltaics",
             "sensor.p_pv_forecast",
@@ -98,9 +95,12 @@ class TestRetrieveHass(unittest.TestCase):
         )
         # Obtain sensor values from saved file
         if self.get_data_from_file:
-            with open(emhass_conf["data_path"] / str(model_type + ".pkl"), "rb") as inp:
-                self.rh.df_final, self.days_list, self.var_list, self.rh.ha_config = (
-                    pickle.load(inp)
+            async with aiofiles.open(
+                emhass_conf["data_path"] / str(model_type + ".pkl"), "rb"
+            ) as f:
+                content = await f.read()
+                self.rh.df_final, self.days_list, self.var_list, self.rh.ha_config = pickle.loads(
+                    content
                 )
                 self.rh.var_list = self.var_list
         # Else obtain sensor values from HA
@@ -115,7 +115,7 @@ class TestRetrieveHass(unittest.TestCase):
                 self.retrieve_hass_conf["sensor_power_photovoltaics"],
                 self.retrieve_hass_conf["sensor_power_photovoltaics_forecast"],
             ]
-            self.rh.get_data(
+            await self.rh.get_data(
                 self.days_list,
                 self.var_list,
                 minimal_response=False,
@@ -142,7 +142,7 @@ class TestRetrieveHass(unittest.TestCase):
             }
             # Check to save updated data to file
             if save_data_to_file:
-                with open(
+                async with aiofiles.open(
                     emhass_conf["data_path"] / str(model_type + ".pkl"), "wb"
                 ) as outp:
                     pickle.dump(
@@ -157,53 +157,60 @@ class TestRetrieveHass(unittest.TestCase):
                     )
         self.df_raw = self.rh.df_final.copy()
 
+    async def asyncTearDown(self):
+        """Clean up after each test - close any open HTTP sessions."""
+        if hasattr(self, "rh") and self.rh is not None:
+            await self.rh.close()
+
     # Check yaml parse in setUp worked
     def test_get_yaml_parse(self):
         self.assertIsInstance(self.retrieve_hass_conf, dict)
-        self.assertTrue("hass_url" in self.retrieve_hass_conf.keys())
+        self.assertIn("hass_url", self.retrieve_hass_conf.keys())
         if self.get_data_from_file:
-            self.assertTrue(
-                self.retrieve_hass_conf["hass_url"] == "https://myhass.duckdns.org/"
-            )
+            self.assertEqual(self.retrieve_hass_conf["hass_url"], "https://myhass.duckdns.org/")
 
     # Check yaml parse worked
-    def test_yaml_parse_web_server(self):
+    async def test_yaml_parse_web_server(self):
         params = {}
         if emhass_conf["defaults_path"].exists():
-            with emhass_conf["defaults_path"].open("r") as data:
-                defaults = json.load(data)
-                params.update(utils.build_params(emhass_conf, {}, defaults, logger))
+            async with aiofiles.open(emhass_conf["defaults_path"]) as file:
+                data = await file.read()
+                defaults = orjson.loads(data)
+                params.update(await utils.build_params(emhass_conf, {}, defaults, logger))
         _, optim_conf, _ = get_yaml_parse(params, logger)
         # Just check forecast methods
-        self.assertFalse(optim_conf.get("weather_forecast_method") is None)
-        self.assertFalse(optim_conf.get("load_forecast_method") is None)
-        self.assertFalse(optim_conf.get("load_cost_forecast_method") is None)
-        self.assertFalse(optim_conf.get("production_price_forecast_method") is None)
+        self.assertIsNot(optim_conf.get("weather_forecast_method"), None)
+        self.assertIsNot(optim_conf.get("load_forecast_method"), None)
+        self.assertIsNot(optim_conf.get("load_cost_forecast_method"), None)
+        self.assertIsNot(optim_conf.get("production_price_forecast_method"), None)
 
     # Assume get_data to HA fails
-    def test_get_data_failed(self):
+    async def test_get_data_failed(self):
         days_list = get_days_list(1)
         var_list = [self.retrieve_hass_conf["sensor_power_load_no_var_loads"]]
-        response = self.rh.get_data(days_list, var_list)
+        response = await self.rh.get_data(days_list, var_list)
         if self.get_data_from_file:
             self.assertFalse(response)
         else:
             self.assertTrue(response)
 
     # Test with html mock response
-    def test_get_data_mock(self):
-        with requests_mock.mock() as m:
+    async def test_get_data_mock(self):
+        with aioresponses() as mocked:
+            test_data_path = emhass_conf["data_path"] / "test_response_get_data_get_method.pbz2"
+
+            async with aiofiles.open(test_data_path, "rb") as f:
+                compressed = await f.read()
+
+            data = bz2.decompress(compressed)
+            data = cPickle.loads(data)
+            data = orjson.loads(data.content)
             days_list = get_days_list(1)
             var_list = [self.retrieve_hass_conf["sensor_power_load_no_var_loads"]]
-            data = bz2.BZ2File(
-                str(
-                    emhass_conf["data_path"] / "test_response_get_data_get_method.pbz2"
-                ),
-                "rb",
-            )
-            data = cPickle.load(data)
-            m.get(self.retrieve_hass_conf["hass_url"], json=data.json())
-            self.rh.get_data(
+            # with aioresponses() as mocked:
+            get_url = self.retrieve_hass_conf["hass_url"]
+            mocked.get(get_url, payload=data, repeat=True)
+            await self.rh.get_data(
                 days_list,
                 var_list,
                 minimal_response=False,
@@ -211,9 +218,7 @@ class TestRetrieveHass(unittest.TestCase):
                 test_url=self.retrieve_hass_conf["hass_url"],
             )
             self.assertIsInstance(self.rh.df_final, type(pd.DataFrame()))
-            self.assertIsInstance(
-                self.rh.df_final.index, pd.core.indexes.datetimes.DatetimeIndex
-            )
+            self.assertIsInstance(self.rh.df_final.index, pd.core.indexes.datetimes.DatetimeIndex)
             self.assertIsInstance(
                 self.rh.df_final.index.dtype, pd.core.dtypes.dtypes.DatetimeTZDtype
             )
@@ -227,16 +232,10 @@ class TestRetrieveHass(unittest.TestCase):
     # Check the dataframe was formatted correctly
     def test_prepare_data(self):
         self.assertIsInstance(self.rh.df_final, type(pd.DataFrame()))
-        self.assertIsInstance(
-            self.rh.df_final.index, pd.core.indexes.datetimes.DatetimeIndex
-        )
-        self.assertIsInstance(
-            self.rh.df_final.index.dtype, pd.core.dtypes.dtypes.DatetimeTZDtype
-        )
+        self.assertIsInstance(self.rh.df_final.index, pd.core.indexes.datetimes.DatetimeIndex)
+        self.assertIsInstance(self.rh.df_final.index.dtype, pd.core.dtypes.dtypes.DatetimeTZDtype)
         self.assertEqual(len(self.rh.df_final.columns), len(self.var_list))
-        self.assertEqual(
-            self.rh.df_final.index.isin(self.days_list).sum(), len(self.days_list)
-        )
+        self.assertEqual(self.rh.df_final.index.isin(self.days_list).sum(), len(self.days_list))
         self.assertEqual(
             self.rh.df_final.index.freq,
             self.retrieve_hass_conf["optimization_time_step"],
@@ -259,9 +258,7 @@ class TestRetrieveHass(unittest.TestCase):
             self.rh.df_final.index.freq,
             self.retrieve_hass_conf["optimization_time_step"],
         )
-        self.assertEqual(
-            self.rh.df_final.index.tz, self.retrieve_hass_conf["time_zone"]
-        )
+        self.assertEqual(self.rh.df_final.index.tz, self.retrieve_hass_conf["time_zone"])
 
     # Test negative load
     def test_prepare_data_negative_load(self):
@@ -285,30 +282,24 @@ class TestRetrieveHass(unittest.TestCase):
             self.rh.df_final.index.freq,
             self.retrieve_hass_conf["optimization_time_step"],
         )
-        self.assertEqual(
-            self.rh.df_final.index.tz, self.retrieve_hass_conf["time_zone"]
-        )
+        self.assertEqual(self.rh.df_final.index.tz, self.retrieve_hass_conf["time_zone"])
 
     # Tests that the prepare_data method does convert missing PV values to zero
     # and also ignores any missing sensor columns.
     def test_prepare_data_missing_pv(self):
         load_sensor = self.retrieve_hass_conf["sensor_power_load_no_var_loads"]
         actual_pv_sensor = self.retrieve_hass_conf["sensor_power_photovoltaics"]
-        forecast_pv_sensor = self.retrieve_hass_conf[
-            "sensor_power_photovoltaics_forecast"
-        ]
+        forecast_pv_sensor = self.retrieve_hass_conf["sensor_power_photovoltaics_forecast"]
         var_replace_zero = [actual_pv_sensor, forecast_pv_sensor, "sensor.missing1"]
         var_interp = [actual_pv_sensor, load_sensor, "sensor.missing2"]
         # Replace actual and forecast PV zero values with NaN's (to test they get replaced back)
-        self.rh.df_final[actual_pv_sensor] = self.rh.df_final[actual_pv_sensor].replace(
+        self.rh.df_final[actual_pv_sensor] = self.rh.df_final[actual_pv_sensor].replace(0, np.nan)
+        self.rh.df_final[forecast_pv_sensor] = self.rh.df_final[forecast_pv_sensor].replace(
             0, np.nan
         )
-        self.rh.df_final[forecast_pv_sensor] = self.rh.df_final[
-            forecast_pv_sensor
-        ].replace(0, np.nan)
         # Verify a non-zero number of missing values in the actual and forecast PV columns before prepare_data
-        self.assertTrue(self.rh.df_final[actual_pv_sensor].isna().sum() > 0)
-        self.assertTrue(self.rh.df_final[forecast_pv_sensor].isna().sum() > 0)
+        self.assertGreater(self.rh.df_final[actual_pv_sensor].isna().sum(), 0)
+        self.assertGreater(self.rh.df_final[forecast_pv_sensor].isna().sum(), 0)
         self.rh.prepare_data(
             load_sensor,
             load_negative=False,
@@ -330,12 +321,122 @@ class TestRetrieveHass(unittest.TestCase):
             len(self.rh.df_final[forecast_pv_sensor]),
         )
         # Verify no missing values in the actual and forecast PV columns after prepare_data
-        self.assertTrue(self.rh.df_final[actual_pv_sensor].isna().sum() == 0)
-        self.assertTrue(self.rh.df_final[forecast_pv_sensor].isna().sum() == 0)
+        self.assertEqual(self.rh.df_final[actual_pv_sensor].isna().sum(), 0)
+        self.assertEqual(self.rh.df_final[forecast_pv_sensor].isna().sum(), 0)
+
+    # Proposed new test method for InfluxDB
+    @patch("influxdb.InfluxDBClient", autospec=True)
+    async def test_get_data_influxdb_mock(self, mock_influx_client_class):
+        """
+        Test the get_data_influxdb method by mocking the InfluxDB client.
+        """
+        # Build a correctly structured params dictionary for the test
+        params_influx = {
+            "retrieve_hass_conf": {
+                "use_influxdb": True,
+                "influxdb_host": "fake-host",
+                "influxdb_port": 8086,
+                "influxdb_username": "fake-user",
+                "influxdb_password": "fake-pass",  # pragma: allowlist secret
+                "influxdb_database": "fake-db",
+                "influxdb_measurement": "W",
+                # Add other necessary keys from the original conf
+                "sensor_power_photovoltaics": self.retrieve_hass_conf["sensor_power_photovoltaics"],
+                "sensor_power_load_no_var_loads": self.retrieve_hass_conf[
+                    "sensor_power_load_no_var_loads"
+                ],
+            }
+        }
+
+        # Instantiate RetrieveHass with the correctly nested configuration
+        rh_influx = RetrieveHass(
+            self.retrieve_hass_conf["hass_url"],
+            self.retrieve_hass_conf["long_lived_token"],
+            self.retrieve_hass_conf["optimization_time_step"],
+            self.retrieve_hass_conf["time_zone"],
+            params_influx,
+            emhass_conf,
+            logger,
+            get_data_from_file=False,
+        )
+
+        # Mock the client instance that will be created inside the method
+        mock_client_instance = mock_influx_client_class.return_value
+
+        # Define mock data points to be returned by the client
+        mock_pv_data = [
+            {"time": "2023-04-01T10:00:00Z", "mean_value": 1500.0},
+            {"time": "2023-04-01T10:30:00Z", "mean_value": 1800.0},
+        ]
+        mock_load_data = [
+            {"time": "2023-04-01T10:00:00Z", "mean_value": 500.0},
+            {"time": "2023-04-01T10:30:00Z", "mean_value": 450.0},
+        ]
+
+        # Define a side_effect function to handle different queries
+        def query_side_effect(query):
+            mock_result = MagicMock()
+            if "SHOW MEASUREMENTS" in query:
+                mock_result.get_points.return_value = [{"name": "W"}]
+            elif "SHOW TAG VALUES" in query and '"W"' in query:
+                mock_result.get_points.return_value = [
+                    {"value": "power_photovoltaics"},
+                    {"value": "power_load_no_var_loads"},
+                ]
+            elif "entity_id" in query and "'power_photovoltaics'" in query:
+                mock_result.get_points.return_value = mock_pv_data
+            elif "entity_id" in query and "'power_load_no_var_loads'" in query:
+                mock_result.get_points.return_value = mock_load_data
+            else:
+                mock_result.get_points.return_value = []
+            return mock_result
+
+        # Assign the handler to the mock instance's query method
+        mock_client_instance.query.side_effect = query_side_effect
+
+        # Define the inputs for the get_data method
+        days_list = pd.date_range(start="2023-04-01", periods=1, freq="D", tz="UTC")
+        var_list = [
+            params_influx["retrieve_hass_conf"]["sensor_power_photovoltaics"],
+            params_influx["retrieve_hass_conf"]["sensor_power_load_no_var_loads"],
+        ]
+
+        # Call the method to be tested
+        success = await rh_influx.get_data(days_list, var_list)
+
+        # Verify the outcomes
+        self.assertTrue(success)  # Check if the method reports success
+
+        # Verify that the InfluxDB client was initialized correctly
+        mock_influx_client_class.assert_called_with(
+            host="fake-host",
+            port=8086,
+            username="fake-user",
+            password="fake-pass",  # pragma: allowlist secret
+            database="fake-db",
+            ssl=False,
+            verify_ssl=False,
+        )
+        mock_client_instance.ping.assert_called_once()
+        mock_client_instance.close.assert_called_once()
+
+        # Verify the resulting DataFrame
+        df = rh_influx.df_final
+        self.assertIsInstance(df, pd.DataFrame)
+        self.assertEqual(len(df.index), 2)
+        self.assertEqual(list(df.columns), var_list)
+        self.assertEqual(
+            df.loc["2023-04-01 10:00:00+00:00"]["sensor.power_photovoltaics"],
+            1500.0,
+        )
+        self.assertEqual(
+            df.loc["2023-04-01 10:30:00+00:00"]["sensor.power_load_no_var_loads"],
+            450.0,
+        )
 
     # Test publish data
-    def test_publish_data(self):
-        response, data = self.rh.post_data(
+    async def test_publish_data(self):
+        response, data = await self.rh.post_data(
             self.df_raw[self.df_raw.columns[0]],
             10,
             "sensor.p_pv_forecast",
@@ -345,23 +446,19 @@ class TestRetrieveHass(unittest.TestCase):
             type_var="power",
         )
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(
-            data["state"]
-            == "{:.2f}".format(
-                np.round(
-                    self.df_raw.loc[self.df_raw.index[10], self.df_raw.columns[0]], 2
-                )
-            )
+        self.assertEqual(
+            data["state"],
+            f"{np.round(self.df_raw.loc[self.df_raw.index[10], self.df_raw.columns[0]], 2):.2f}",
         )
-        self.assertTrue(data["attributes"]["unit_of_measurement"] == "Unit")
-        self.assertTrue(data["attributes"]["friendly_name"] == "Variable")
+        self.assertEqual(data["attributes"]["unit_of_measurement"], "Unit")
+        self.assertEqual(data["attributes"]["friendly_name"], "Variable")
         # Lets test publishing a forecast with more added attributes
         df = copy.deepcopy(self.df_raw.iloc[0:30])
-        df.columns = ["P_Load", "P_PV", "P_PV_forecast"]
+        df.columns = ["P_Load", "P_PV", "p_pv_forecast"]
         df["P_batt"] = 1000.0
         df["SOC_opt"] = 0.5
-        response, data = self.rh.post_data(
-            df["P_PV_forecast"],
+        response, data = await self.rh.post_data(
+            df["p_pv_forecast"],
             10,
             "sensor.p_pv_forecast",
             "power",
@@ -370,13 +467,11 @@ class TestRetrieveHass(unittest.TestCase):
             type_var="power",
         )
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(
-            data["state"] == f"{np.round(df.loc[df.index[10], df.columns[2]], 2):.2f}"
-        )
-        self.assertTrue(data["attributes"]["unit_of_measurement"] == "W")
-        self.assertTrue(data["attributes"]["friendly_name"] == "PV Forecast")
+        self.assertEqual(data["state"], f"{np.round(df.loc[df.index[10], df.columns[2]], 2):.2f}")
+        self.assertEqual(data["attributes"]["unit_of_measurement"], "W")
+        self.assertEqual(data["attributes"]["friendly_name"], "PV Forecast")
         self.assertIsInstance(data["attributes"]["forecasts"], list)
-        response, data = self.rh.post_data(
+        response, data = await self.rh.post_data(
             df["P_batt"],
             25,
             "sensor.p_batt_forecast",
@@ -386,9 +481,9 @@ class TestRetrieveHass(unittest.TestCase):
             type_var="batt",
         )
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(data["attributes"]["unit_of_measurement"] == "W")
-        self.assertTrue(data["attributes"]["friendly_name"] == "Battery Power Forecast")
-        response, data = self.rh.post_data(
+        self.assertEqual(data["attributes"]["unit_of_measurement"], "W")
+        self.assertEqual(data["attributes"]["friendly_name"], "Battery Power Forecast")
+        response, data = await self.rh.post_data(
             df["SOC_opt"],
             25,
             "sensor.SOC_forecast",
@@ -398,8 +493,462 @@ class TestRetrieveHass(unittest.TestCase):
             type_var="SOC",
         )
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(data["attributes"]["unit_of_measurement"] == "%")
-        self.assertTrue(data["attributes"]["friendly_name"] == "Battery SOC Forecast")
+        self.assertEqual(data["attributes"]["unit_of_measurement"], "%")
+        self.assertEqual(data["attributes"]["friendly_name"], "Battery SOC Forecast")
+
+    @patch("emhass.retrieve_hass.get_websocket_client")
+    async def test_get_ha_config(self, mock_get_ws):
+        # Test REST API success
+        with aioresponses() as mocked:
+            mocked.get(
+                self.retrieve_hass_conf["hass_url"] + "api/config",
+                payload={"time_zone": "Europe/Paris", "currency": "EUR"},
+                status=200,
+            )
+            self.rh.use_websocket = False
+            result = await self.rh.get_ha_config()
+            self.assertTrue(result)
+            self.assertEqual(self.rh.ha_config["time_zone"], "Europe/Paris")
+
+        # Test REST API failure (401)
+        with aioresponses() as mocked:
+            mocked.get(
+                self.retrieve_hass_conf["hass_url"] + "api/config",
+                status=401,
+            )
+            result = await self.rh.get_ha_config()
+            self.assertFalse(result)
+
+        # Test WebSocket success
+        self.rh.use_websocket = True
+        mock_client = MagicMock()
+        mock_client.get_config = AsyncMock(return_value={"time_zone": "Asia/Tokyo"})
+        mock_get_ws.return_value = mock_client
+
+        result = await self.rh.get_ha_config()
+        self.assertEqual(result, {"time_zone": "Asia/Tokyo"})
+
+        # Reset for other tests
+        self.rh.use_websocket = False
+
+    @patch("emhass.retrieve_hass.get_websocket_client", new_callable=AsyncMock)
+    @patch("emhass.retrieve_hass.RetrieveHass._get_data_rest_api")
+    async def test_get_data_websocket(self, mock_rest_fallback, mock_get_ws):
+        # Setup common vars
+        days_list = pd.date_range(start="2024-01-01", periods=2, freq="D", tz="UTC")
+        var_list = ["sensor.power_load"]
+
+        # Test Successful WebSocket Retrieval
+        self.rh.use_websocket = True
+
+        # Configure the mock client
+        mock_client = MagicMock()
+        mock_get_ws.return_value = mock_client
+
+        # Mock statistics return data with ISO timestamp to ensure robust parsing
+        start_iso = days_list[0].isoformat()
+        mock_stats = {
+            "sensor.power_load": [
+                {"start": start_iso, "mean": 1000.0},
+                # Add more data points to ensure valid resampling
+                {"start": (days_list[0] + pd.Timedelta("30min")).isoformat(), "mean": 1500.0},
+            ]
+        }
+        mock_client.get_statistics = AsyncMock(return_value=mock_stats)
+
+        success = await self.rh.get_data_websocket(days_list, var_list)
+
+        self.assertTrue(success, "get_data_websocket returned False")
+        self.assertFalse(self.rh.df_final.empty, "Resulting DataFrame is empty")
+        self.assertIn("sensor.power_load", self.rh.df_final.columns)
+
+        # Test Connection Failure -> Fallback to REST
+        mock_get_ws.side_effect = Exception("Connection refused")
+        mock_rest_fallback.return_value = True  # Mock REST success
+
+        success = await self.rh.get_data(days_list, var_list)
+
+        self.assertTrue(success)
+        mock_rest_fallback.assert_called_once()
+
+        # Reset side effect
+        mock_get_ws.side_effect = None
+        self.rh.use_websocket = False
+
+    async def test_get_data_rest_api_errors(self):
+        days_list = pd.date_range(start="2024-01-01", periods=1, freq="D", tz="UTC")
+        var_list = ["sensor.test"]
+        url = (
+            self.retrieve_hass_conf["hass_url"]
+            + "api/history/period/"
+            + days_list[0].isoformat()
+            + "?filter_entity_id=sensor.test"
+        )
+
+        # Test Connection Error (Exception)
+        with aioresponses() as mocked:
+            mocked.get(url, exception=Exception("Network down"))
+            result = await self.rh._get_data_rest_api(days_list, var_list)
+            self.assertFalse(result)
+
+        # Test 401 Unauthorized
+        with aioresponses() as mocked:
+            mocked.get(url, status=401)
+            result = await self.rh._get_data_rest_api(days_list, var_list)
+            self.assertFalse(result)
+
+        # Test Empty JSON Response — all days empty should still fail
+        with aioresponses() as mocked:
+            mocked.get(url, payload=[], status=200)
+            result = await self.rh._get_data_rest_api(days_list, var_list)
+            self.assertFalse(result)
+
+    async def test_get_data_rest_api_skips_empty_days(self):
+        """Test that days with no data are skipped gracefully instead of aborting."""
+        # Create a 3-day range where day 1 returns empty, days 2–3 return data
+        days_list = pd.date_range(start="2024-01-01", periods=3, freq="D", tz="UTC")
+        var_list = ["sensor.test_power"]
+
+        # Build URLs for each day
+        base_url = self.retrieve_hass_conf["hass_url"] + "api/history/period/"
+        urls = [
+            base_url + day.strftime("%Y-%m-%dT%H:%M:%SZ") + "?filter_entity_id=sensor.test_power"
+            for day in days_list
+        ]
+
+        # Build mock data: 96 records per day at 15-min intervals
+        def make_day_data(date_str, entity_id="sensor.test_power"):
+            records = []
+            base = pd.Timestamp(date_str, tz="UTC")
+            for i in range(96):
+                ts = base + pd.Timedelta(minutes=15 * i)
+                records.append(
+                    {
+                        "entity_id": entity_id,
+                        "state": str(100.0 + i),
+                        "attributes": {},
+                        "last_changed": ts.isoformat(),
+                        "last_updated": ts.isoformat(),
+                    }
+                )
+            return [records]  # HA wraps per-entity in a list
+
+        with aioresponses() as mocked:
+            # Day 1: empty (sensor didn't exist yet)
+            mocked.get(urls[0], payload=[], status=200)
+            # Day 2: has data
+            mocked.get(urls[1], payload=make_day_data("2024-01-02"), status=200)
+            # Day 3: has data
+            mocked.get(urls[2], payload=make_day_data("2024-01-03"), status=200)
+
+            result = await self.rh._get_data_rest_api(days_list, var_list)
+            # Should succeed with partial data
+            self.assertTrue(result)
+            # Should have data from 2 days, not 3
+            self.assertIsInstance(self.rh.df_final, pd.DataFrame)
+            self.assertFalse(self.rh.df_final.empty)
+            # First data point should be from day 2, not day 1
+            self.assertGreaterEqual(self.rh.df_final.index[0], pd.Timestamp("2024-01-02", tz="UTC"))
+
+    async def test_get_data_rest_api_all_days_empty_fails(self):
+        """Test that if ALL days return empty, it still fails with an error."""
+        days_list = pd.date_range(start="2024-01-01", periods=3, freq="D", tz="UTC")
+        var_list = ["sensor.test_power"]
+
+        base_url = self.retrieve_hass_conf["hass_url"] + "api/history/period/"
+        urls = [
+            base_url + day.strftime("%Y-%m-%dT%H:%M:%SZ") + "?filter_entity_id=sensor.test_power"
+            for day in days_list
+        ]
+
+        with aioresponses() as mocked:
+            for url in urls:
+                mocked.get(url, payload=[], status=200)
+
+            result = await self.rh._get_data_rest_api(days_list, var_list)
+            # All days empty → should fail
+            self.assertFalse(result)
+
+    async def test_get_data_rest_api_error_still_aborts(self):
+        """Test that real errors (HTTP 401, network) still abort immediately."""
+        days_list = pd.date_range(start="2024-01-01", periods=3, freq="D", tz="UTC")
+        var_list = ["sensor.test_power"]
+
+        base_url = self.retrieve_hass_conf["hass_url"] + "api/history/period/"
+        urls = [
+            base_url + day.strftime("%Y-%m-%dT%H:%M:%SZ") + "?filter_entity_id=sensor.test_power"
+            for day in days_list
+        ]
+
+        # Day 1: empty (skip), Day 2: auth error (abort)
+        with aioresponses() as mocked:
+            mocked.get(urls[0], payload=[], status=200)
+            mocked.get(urls[1], status=401)
+
+            result = await self.rh._get_data_rest_api(days_list, var_list)
+            self.assertFalse(result)
+
+    @patch("aiofiles.open")
+    async def test_post_data_extended(self, mock_aio_open):
+        self.rh.get_data_from_file = False
+
+        # Setup mock file context for save_entities=True
+        mock_f = AsyncMock()
+        mock_aio_open.return_value.__aenter__.return_value = mock_f
+
+        # Create dummy data
+        idx = 0
+        entity_id = "sensor.p_pv_forecast"
+        data_df = pd.Series(
+            [100.55, 200.00], index=pd.date_range("2024-01-01", periods=2, freq="30min")
+        )
+        data_df.name = "test_data"
+
+        # Test "cost_fun" type
+        response, data = await self.rh.post_data(
+            data_df, idx, entity_id, "monetary", "EUR", "Cost Function", "cost_fun"
+        )
+        self.assertEqual(data["state"], f"{data_df.sum():.2f}")
+
+        # Test "optim_status" type
+        status_df = pd.Series(["Optimal"], index=[0])
+        response, data = await self.rh.post_data(
+            status_df, 0, "sensor.optim_status", "none", "", "Status", "optim_status"
+        )
+        self.assertEqual(data["state"], "Optimal")
+
+        # Test "deferrable" type (complex attributes)
+        response, data = await self.rh.post_data(
+            data_df, idx, entity_id, "power", "W", "Deferrable", "deferrable"
+        )
+        self.assertIn("deferrables_schedule", data["attributes"])
+
+        # Test "unit_load_cost" (4 decimals)
+        response, data = await self.rh.post_data(
+            data_df, idx, entity_id, "monetary", "EUR/kWh", "Load Cost", "unit_load_cost"
+        )
+        self.assertEqual(data["state"], f"{data_df.iloc[0]:.4f}")
+        self.assertIn("unit_load_cost_forecasts", data["attributes"])
+
+        # Test save_entities=True
+        # Save old path to restore later
+        original_path = self.rh.emhass_conf["data_path"]
+        try:
+            self.rh.emhass_conf["data_path"] = pathlib.Path("/tmp")
+
+            # Mock os.path.isfile to return False (triggers new metadata file creation)
+            with patch("os.path.isfile", return_value=False):
+                # Mock pathlib.Path.mkdir to avoid file system errors
+                with patch("pathlib.Path.mkdir"):
+                    # FIX: Pass dont_post=True to bypass network failure and force response_ok=True
+                    # This ensures the save_entities logic block is actually reached
+                    response, data = await self.rh.post_data(
+                        data_df,
+                        idx,
+                        entity_id,
+                        "power",
+                        "W",
+                        "PV",
+                        "power",
+                        save_entities=True,
+                        dont_post=True,
+                    )
+        finally:
+            # Restore path to prevent polluting other tests
+            self.rh.emhass_conf["data_path"] = original_path
+
+        # Verify file write called (once for data, once for metadata)
+        self.assertTrue(mock_f.write.called)
+        self.assertGreaterEqual(mock_f.write.call_count, 2)
+
+        # Test Error Handling (response_ok = False)
+        # We need to un-patch the aioresponses or create a new specific patch for client session
+        with patch("aiohttp.ClientSession.post") as mock_post:
+            mock_resp = AsyncMock()
+            mock_resp.ok = False
+            mock_resp.status = 500
+            mock_resp.__aenter__.return_value = mock_resp
+            mock_post.return_value = mock_resp
+
+            # Use dont_post=False to force network attempt
+            # Ensure get_data_from_file is False (set at start of test)
+            response, _ = await self.rh.post_data(
+                data_df, idx, entity_id, "power", "W", "Fail", "power", dont_post=False
+            )
+
+            self.assertFalse(response.ok)
+            self.assertEqual(response.status_code, 500)
+
+    async def test_session_lazy_initialization(self):
+        """Test that session is lazily initialized on first use."""
+        # Session should be None initially
+        self.assertIsNone(self.rh._session)
+
+        # Get session should create one
+        session = await self.rh._get_session()
+        self.assertIsNotNone(session)
+        self.assertFalse(session.closed)
+
+        # Getting session again should return the same instance
+        session2 = await self.rh._get_session()
+        self.assertIs(session, session2)
+
+        # Clean up
+        await self.rh.close()
+
+    async def test_session_reuse_across_post_data_calls(self):
+        """Test that the same session is reused across multiple post_data calls."""
+        self.rh.get_data_from_file = False
+
+        # Create test data
+        data_df = pd.Series(
+            [100.0, 200.0], index=pd.date_range("2024-01-01", periods=2, freq="30min")
+        )
+
+        # Mock aiohttp session.post to track calls
+        with patch.object(self.rh, "_get_session") as mock_get_session:
+            mock_session = AsyncMock()
+            mock_response = AsyncMock()
+            mock_response.ok = True
+            mock_response.status = 200
+            mock_session.post.return_value.__aenter__.return_value = mock_response
+            mock_get_session.return_value = mock_session
+
+            # Make multiple post_data calls
+            await self.rh.post_data(data_df, 0, "sensor.test1", "power", "W", "Test 1", "power")
+            await self.rh.post_data(data_df, 0, "sensor.test2", "power", "W", "Test 2", "power")
+            await self.rh.post_data(data_df, 0, "sensor.test3", "power", "W", "Test 3", "power")
+
+            # _get_session should have been called 3 times (once per post_data)
+            # but it returns the same session each time
+            self.assertEqual(mock_get_session.call_count, 3)
+
+    async def test_session_close(self):
+        """Test that close() properly closes the session."""
+        # Create a session first
+        session = await self.rh._get_session()
+        self.assertIsNotNone(session)
+        self.assertFalse(session.closed)
+
+        # Close should work
+        await self.rh.close()
+        self.assertIsNone(self.rh._session)
+
+        # Closing again should be a no-op (no error)
+        await self.rh.close()
+
+    async def test_session_recreated_after_close(self):
+        """Test that a new session is created after closing the old one."""
+        # Create initial session
+        session1 = await self.rh._get_session()
+
+        # Close it
+        await self.rh.close()
+
+        # Get a new session
+        session2 = await self.rh._get_session()
+
+        # Should be a different session
+        self.assertIsNot(session1, session2)
+        self.assertFalse(session2.closed)
+
+        # Clean up
+        await self.rh.close()
+
+    async def test_async_context_manager(self):
+        """Test that RetrieveHass works as an async context manager."""
+        async with self.rh as rh:
+            # Should return self
+            self.assertIs(rh, self.rh)
+            # Create a session inside the context
+            session = await rh._get_session()
+            self.assertIsNotNone(session)
+            self.assertFalse(session.closed)
+
+        # After exiting context, session should be closed
+        self.assertIsNone(self.rh._session)
+
+    async def test_concurrent_get_session(self):
+        """Test that concurrent _get_session calls only create one session."""
+        # Launch multiple concurrent _get_session calls
+        sessions = await asyncio.gather(
+            self.rh._get_session(),
+            self.rh._get_session(),
+            self.rh._get_session(),
+        )
+        # All should return the same session instance
+        self.assertIs(sessions[0], sessions[1])
+        self.assertIs(sessions[1], sessions[2])
+
+        # Clean up
+        await self.rh.close()
+
+    @patch.dict(os.environ, {"SUPERVISOR_TOKEN": "mock_supervisor_token"})
+    async def test_supervisor_token_fallback_success(self):
+        """Test that SUPERVISOR_TOKEN is used when long_lived_token is empty."""
+        rh_empty_token = RetrieveHass(
+            self.retrieve_hass_conf["hass_url"],
+            "empty",  # Trigger the token == "empty" fallback
+            self.retrieve_hass_conf["optimization_time_step"],
+            self.retrieve_hass_conf["time_zone"],
+            {},
+            emhass_conf,
+            logger,
+            get_data_from_file=False,
+        )
+
+        # Test get_ha_config fallback (The first coverage gap: lines 184-186)
+        with self.assertLogs(logger, level="DEBUG") as cm:
+            with aioresponses() as mocked:
+                mocked.get(
+                    rh_empty_token.hass_url + "api/config", status=200, payload={"time_zone": "UTC"}
+                )
+                await rh_empty_token.get_ha_config()
+        self.assertTrue(any("Using SUPERVISOR_TOKEN" in log for log in cm.output))
+
+        # Test _get_data_rest_api fallback (The second coverage gap: lines 448-450)
+        days_list = pd.date_range(start="2024-01-01", periods=1, freq="D", tz="UTC")
+        var_list = ["sensor.test"]
+        with self.assertLogs(logger, level="DEBUG") as cm:
+            with aioresponses() as mocked:
+                # Mock the exact URL called
+                url = (
+                    rh_empty_token.hass_url
+                    + "api/history/period/"
+                    + days_list[0].isoformat()
+                    + "?filter_entity_id=sensor.test"
+                )
+                mocked.get(url, status=200, payload=[])
+                await rh_empty_token._get_data_rest_api(days_list, var_list)
+        self.assertTrue(any("Using SUPERVISOR_TOKEN" in log for log in cm.output))
+
+    @patch.dict(os.environ, {}, clear=True)
+    async def test_supervisor_token_fallback_failure(self):
+        """Test that an error is logged and returns False when no token is available."""
+        # Ensure SUPERVISOR_TOKEN is completely missing from environment
+        if "SUPERVISOR_TOKEN" in os.environ:
+            del os.environ["SUPERVISOR_TOKEN"]
+
+        rh_no_token = RetrieveHass(
+            self.retrieve_hass_conf["hass_url"],
+            "empty",  # Trigger the token == "empty" fallback
+            self.retrieve_hass_conf["optimization_time_step"],
+            self.retrieve_hass_conf["time_zone"],
+            {},
+            emhass_conf,
+            logger,
+            get_data_from_file=False,
+        )
+
+        days_list = pd.date_range(start="2024-01-01", periods=1, freq="D", tz="UTC")
+        var_list = ["sensor.test"]
+
+        # Test the final coverage gap (lines 454-457): No token anywhere
+        with self.assertLogs(logger, level="ERROR") as cm:
+            result = await rh_no_token._get_data_rest_api(days_list, var_list)
+
+        self.assertFalse(result)
+        self.assertTrue(any("No valid authentication token found" in log for log in cm.output))
 
 
 if __name__ == "__main__":

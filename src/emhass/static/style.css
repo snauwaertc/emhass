@@ -162,7 +162,6 @@ a:active {
 
 a:active,
 a:hover {
-  outline-width: 0;
   outline: 0;
 }
 
@@ -217,7 +216,7 @@ blockquote> :last-child {
   margin-bottom: 0;
 }
 
-padding b,
+b,
 strong {
   font-weight: inherit;
   font-weight: 600;
@@ -338,7 +337,6 @@ hr::after {
 }
 
 img {
-  border-style: none;
   border: 0;
   max-width: 50%;
 }
@@ -451,6 +449,7 @@ html [type="button"],
 [type="reset"],
 [type="submit"] {
   -webkit-appearance: button;
+  appearance: button;
 }
 
 button::-moz-focus-inner,
@@ -503,6 +502,7 @@ textarea {
 
 [type="search"] {
   -webkit-appearance: textfield;
+  appearance: textfield;
   outline-offset: -2px;
 }
 
@@ -679,10 +679,19 @@ button {
 .mystyle,
 .main-svg {
   font-size: 11pt;
-  font-family: Arial;
-  border-collapse: collapse;
+  font-family: Arial, sans-serif;
+  border-collapse: separate;
+  border-spacing: 0;
   border-style: hidden;
 }
+
+.mystyle td,
+.mystyle th {
+  border-width: 0 1px 1px 0;
+}
+
+.mystyle td:first-child,
+.mystyle thead th:first-child { border-left-width: 1px; }
 
 .mystyle td {
   padding: 5px;
@@ -705,6 +714,32 @@ th {
 .mystyle tr:hover td {
   background-color: silver;
   cursor: pointer;
+}
+
+/* Fixed clone rendered by JS for sticky header row */
+.sticky-header-wrapper {
+  position: fixed;
+  top: 0;
+  overflow: hidden;
+  z-index: 100;
+  visibility: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+/* Sticky first column */
+.mystyle td:first-child,
+.mystyle thead th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+
+/* Opaque background for sticky header row (original table + JS clone) */
+.mystyle thead th {
+  background: #e1e1e1;
+  border-top-width: 1px;
+  z-index: 2;
 }
 
 th:last-child {
@@ -919,7 +954,7 @@ select,
 .input-buttons {
   max-width: 50%;
   display: flex;
-  align-items: "center";
+  align-items: center;
   align-self: center;
   align-items: center;
   box-sizing: inherit;
@@ -1158,9 +1193,7 @@ input:checked+.slider:before {
 
 .param h5,
 p {
-  margin: 5px;
-  margin-left: 0px;
-  margin-bottom: 0px;
+  margin: 5px 5px 0 0;
 }
 
 .param button {
@@ -1319,6 +1352,11 @@ p {
   .mystyle tr:hover td {
     background-color: #3f3f3f;
   }
+
+  .mystyle thead th { background: #282928; }
+
+  .mystyle td,
+  .mystyle th { border-color: #666; }
 
   .modebar-group {
     background-color: #0000 !important;

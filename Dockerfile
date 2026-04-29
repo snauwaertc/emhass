@@ -1,8 +1,8 @@
 ## EMHASS Docker
-## Docker run addon testing example:
-    ## docker build -t emhass .
-    ## OR docker build --build-arg TARGETARCH=amd64 -t emhass .
-    ## docker run --rm -it -p 5000:5000 --name emhass-container -v ./config.json:/share/config.json -v ./secrets_emhass.yaml:/app/secrets_emhass.yaml emhass
+## Docker run app testing example:
+## docker build -t emhass .
+## OR docker build --build-arg TARGETARCH=amd64 -t emhass .
+## docker run --rm -it -p 5000:5000 --name emhass-container -v ./config.json:/share/config.json -v ./secrets_emhass.yaml:/app/secrets_emhass.yaml emhass
 
 # armhf,amd64,armv7,aarch64
 ARG TARGETARCH
@@ -22,46 +22,43 @@ COPY gunicorn.conf.py /app/
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-    # Numpy
+    # Basic utilities
+    gnupg \
+    curl \
+    ca-certificates \
+    # Numpy dependencies
     libgfortran5 \
     libopenblas0-pthread \
     libopenblas-dev \
     libatlas3-base \
     libatlas-base-dev \
-    # h5py / tables
+    # h5py / tables dependencies
     libsz2 \
     libaec0 \
     libhdf5-hl-100 \
     libhdf5-103-1 \
     libhdf5-dev \
     libhdf5-serial-dev \
-    # cbc
-    coinor-cbc \
-    coinor-libcbc-dev \
-    # glpk
-    glpk-utils
-
-# add build packadges (just in case wheel does not exist)
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+    # build packages
     gcc \
+    g++ \
     patchelf \
     cmake \
-    ninja-build
-
-# Install uv (pip alternative)
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
-# Install python (version based on .python-version)
-RUN uv python install
-
-# specify hdf5
-RUN ln -s /usr/include/hdf5/serial /usr/include/hdf5/include && export HDF5_DIR=/usr/include/hdf5
-
-# make sure data directory exists
-RUN mkdir -p /data/
-
-# make sure emhass share directory exists
-RUN mkdir -p /share/emhass/
+    ninja-build \
+    # Runtime dependencies
+    tini \
+    # Cleanup apt caches to reduce image size
+    && rm -rf /var/cache/apt/* \
+    && rm -rf /var/lib/apt/lists/* \
+    # Install uv
+    && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh \
+    # Install python
+    && uv python install \
+    # Setup HDF5 symlinks
+    && ln -s /usr/include/hdf5/serial /usr/include/hdf5/include \
+    # Create directories
+    && mkdir -p /data/ \
+    && mkdir -p /share/emhass/
 
 # copy required EMHASS files
 COPY src/emhass/ /app/src/emhass/
@@ -72,12 +69,12 @@ COPY src/emhass/static/ /app/src/emhass/static/
 COPY src/emhass/static/data/ /app/src/emhass/static/data/
 COPY src/emhass/static/img/ /app/src/emhass/static/img/
 
-# emhass extra packadge data 
+# emhass extra packadge data
 COPY src/emhass/data/ /app/src/emhass/data/
 
-# pre generated optimization results 
-COPY data/opt_res_latest.csv /data/
-COPY data/long_train_data.pkl /data/
+# pre generated optimization results
+COPY data/opt_res_latest.csv /app/data/opt_res_latest.csv
+COPY data/long_train_data.pkl /app/data/long_train_data.pkl
 COPY README.md /app/
 COPY pyproject.toml /app/
 
@@ -98,32 +95,42 @@ LABEL \
     org.opencontainers.image.source="https://github.com/davidusb-geek/emhass" \
     org.opencontainers.image.description="EMHASS python package and requirements, in Home Assistant Debian container."
 
-# Set up venv
-RUN uv venv && . .venv/bin/activate
+# Set up venv and add it to the PATH so it persists across RUN layers
+RUN uv venv
+ENV PATH="/app/.venv/bin:$PATH"
 
-RUN [[ "${TARGETARCH}" == "aarch64" ]] && uv pip install --verbose ndindex || echo "libatomic1 cant be installed"
+# Swapped bashisms [[ == ]] for POSIX compliant [ = ] for Debian dash shell compatibility
+RUN [ "${TARGETARCH}" = "aarch64" ] && uv pip install --verbose ndindex || echo "libatomic1 cant be installed"
 
-
-# install packadges and build EMHASS
+# install packages and build EMHASS
 RUN uv pip install --verbose .
 RUN uv lock
 
 # remove build only packages
 RUN apt-get remove --purge -y --auto-remove \
     gcc \
+    g++ \
     patchelf \
     cmake \
     ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
-ENTRYPOINT [ "uv", "run", "--frozen", "gunicorn", "emhass.web_server:create_app()" ]
+# Environment variables for flexibility
+ENV WORKER_CLASS=uvicorn.workers.UvicornWorker
+ENV PORT=5000
+ENV IP=0.0.0.0
 
-# for running Unittest
-#COPY tests/ /app/tests
-#RUN apt-get update &&  apt-get install python3-requests-mock -y
-#COPY data/ /app/data/
-#ENTRYPOINT ["uv","run","unittest","discover","-s","./tests","-p","test_*.py"]
-
-# Example of 32 bit specific 
-# try, symlink apt cbc, to pulp cbc, in python directory (for 32bit)
-#RUN [[ "${TARGETARCH}" == "armhf" || "${TARGETARCH}" == "armv7"  ]] &&  ln -sf /usr/bin/cbc /usr/local/lib/python3.11/dist-packages/pulp/solverdir/cbc/linux/32/cbc || echo "cbc symlink didnt work/not required"
+# Entrypoint script inline
+ENTRYPOINT ["/usr/bin/tini", "--", "/bin/bash", "-c", "set -e && \
+if [ ! -f /data/long_train_data.pkl ]; then \
+    echo 'Initializing data: Copying default PKL file...'; \
+    cp /app/data/long_train_data.pkl /data/; \
+fi && \
+if [ ! -f /data/opt_res_latest.csv ]; then \
+    echo 'Initializing data: Copying default CSV file...'; \
+    cp /app/data/opt_res_latest.csv /data/; \
+fi && \
+WORKER_CLASS=${WORKER_CLASS:-uvicorn.workers.UvicornWorker} && \
+PORT=${PORT:-5000} && \
+IP=${IP:-0.0.0.0} && \
+exec uv run --frozen gunicorn emhass.web_server:app -c gunicorn.conf.py -k \"$WORKER_CLASS\""]
