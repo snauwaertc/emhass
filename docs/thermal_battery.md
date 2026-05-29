@@ -118,7 +118,7 @@ The default thermal battery model uses a Carnot-based COP that varies with outdo
     * Example: `0.9` for a condensing gas boiler
     * When both `efficiency` and heat-pump fields are present, `efficiency` takes precedence.
 
-Configure one `thermal_battery` per source-target pair to model hybrid systems. For example, a gas boiler serving both a heating buffer and a DHW tank is two `def_load_config` entries (one per target), grouped via `deferrable_load_groups` with `mutual_exclusion: true` and `max_power` equal to the boiler's modulating maximum if the two targets share the same physical actuator.
+Configure one `thermal_battery` per source-target pair to model hybrid systems. For example, a gas boiler serving both a heating buffer and a DHW tank is two `def_load_config` entries (one per target), grouped via `deferrable_load_groups` with `mutual_exclusion: true` and `max_power` equal to the boiler's modulating maximum if the two targets share the same physical actuator. To declare multi-source setups like this as a graph instead of hand-aligning the deferrable-load arrays, see [heat_topology.md](heat_topology.md).
 
 ### Heating demand calculation
 
