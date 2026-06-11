@@ -8,6 +8,7 @@ import os
 import pathlib
 import shutil
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -145,18 +146,40 @@ def get_forecast_dates(
     return [ts.isoformat() for ts in forecast_dates]
 
 
+def normalize_heat_cool_mode(
+    value: str,
+    *,
+    field_name: str = "mode",
+    context: str | None = None,
+) -> str:
+    """Normalize heat/cool mode values and raise on invalid input."""
+    mode_norm = str(value).strip().lower()
+    if mode_norm not in {"heat", "cool"}:
+        prefix = f"{context}: " if context else ""
+        raise ValueError(f"{prefix}invalid {field_name} '{value}'. Expected 'heat' or 'cool'.")
+    return mode_norm
+
+
 def calculate_cop_heatpump(
-    supply_temperature: float,
+    supply_temperature: float | np.ndarray | pd.Series,
     carnot_efficiency: float,
     outdoor_temperature_forecast: np.ndarray | pd.Series,
+    mode: str = "heat",
 ) -> np.ndarray:
     r"""
     Calculate heat pump Coefficient of Performance (COP) for each timestep in the prediction horizon.
 
-    The COP is calculated using a Carnot-based formula:
+        The COP is calculated using a Carnot-based formula. Two modes are supported:
 
-    .. math::
-        COP(h) = \eta_{carnot} \times \frac{T_{supply\_K}}{|T_{supply\_K} - T_{outdoor\_K}(h)|}
+        - ``mode='heat'`` (default):
+
+            .. math::
+                    COP_{heat}(h) = \eta_{carnot} \times \frac{T_{supply\_K}}{T_{supply\_K} - T_{outdoor\_K}(h)}
+
+        - ``mode='cool'``:
+
+            .. math::
+                    COP_{cool}(h) = \eta_{carnot} \times \frac{T_{supply\_K}}{T_{outdoor\_K}(h) - T_{supply\_K}}
 
     Where temperatures are converted to Kelvin (K = °C + 273.15).
 
@@ -164,9 +187,11 @@ def calculate_cop_heatpump(
     (difference between supply and outdoor temperature) increases. The carnot_efficiency factor
     represents the real-world efficiency as a fraction of the ideal Carnot cycle efficiency.
 
-    :param supply_temperature: The heat pump supply temperature in degrees Celsius (constant value). \
-        Typical values: 30-40°C for underfloor heating, 50-70°C for radiator systems.
-    :type supply_temperature: float
+    :param supply_temperature: The heat pump supply temperature in degrees Celsius. \
+        Can be a scalar (constant supply T) or an array/Series matching the length of \
+        ``outdoor_temperature_forecast`` for weather-compensated supply T (heating curve). \
+        Typical scalar values: 30-40°C for underfloor heating, 50-70°C for radiator systems.
+    :type supply_temperature: float or np.ndarray or pd.Series
     :param carnot_efficiency: Real-world efficiency factor as fraction of ideal Carnot cycle. \
         Typical range: 0.35-0.50 (35-50%). Default in thermal battery config: 0.4 (40%). \
         Higher values represent more efficient heat pumps.
@@ -174,6 +199,10 @@ def calculate_cop_heatpump(
     :param outdoor_temperature_forecast: Array of outdoor temperature forecasts in degrees Celsius, \
         one value per timestep in the prediction horizon.
     :type outdoor_temperature_forecast: np.ndarray or pd.Series
+    :param mode: Operating mode, either ``"heat"`` or ``"cool"``. In cooling mode,
+        the Carnot lift uses ``T_outdoor - T_supply`` so warm weather no longer
+        collapses to COP=1.0 as in heating-only validation.
+    :type mode: str
     :return: Array of COP values for each timestep, same length as outdoor_temperature_forecast. \
         Typical COP range: 2-6 for normal operating conditions.
     :rtype: np.ndarray
@@ -194,39 +223,61 @@ def calculate_cop_heatpump(
     else:
         outdoor_temps = np.asarray(outdoor_temperature_forecast)
 
+    # Supply temp can be scalar (constant) or array (heating curve). Broadcast either way.
+    if isinstance(supply_temperature, pd.Series):
+        supply_temps = supply_temperature.values
+    elif np.ndim(supply_temperature) > 0:
+        supply_temps = np.asarray(supply_temperature, dtype=float)
+    else:
+        supply_temps = float(supply_temperature)
+
     # Convert temperatures from Celsius to Kelvin for Carnot formula
-    supply_temperature_kelvin = supply_temperature + 273.15
+    supply_temperature_kelvin = supply_temps + 273.15
     outdoor_temperature_kelvin = outdoor_temps + 273.15
 
-    # Calculate temperature difference (supply - outdoor)
-    # For heating, supply temperature should be higher than outdoor temperature
-    temperature_diff = supply_temperature_kelvin - outdoor_temperature_kelvin
+    mode_norm = normalize_heat_cool_mode(mode, field_name="mode", context="COP calculation")
 
-    # Check for non-physical scenarios where outdoor temp >= supply temp
-    # This indicates cooling mode or invalid configuration for heating
+    # Calculate temperature lift depending on mode.
+    if mode_norm == "heat":
+        # Heating: source is outdoor, sink is supply side.
+        temperature_diff = supply_temperature_kelvin - outdoor_temperature_kelvin
+        invalid_relation = "outdoor temperature >= supply temperature"
+    else:
+        # Cooling: source is indoor/chilled supply side, sink is outdoor.
+        temperature_diff = outdoor_temperature_kelvin - supply_temperature_kelvin
+        invalid_relation = "outdoor temperature <= supply temperature"
+
+    # Check for non-physical scenarios where Carnot lift is non-positive.
     if np.any(temperature_diff <= 0):
-        # Log warning about non-physical temperature scenario
         logger = logging.getLogger(__name__)
-        num_invalid = np.sum(temperature_diff <= 0)
+        num_invalid = int(np.sum(temperature_diff <= 0))
         invalid_indices = np.nonzero(temperature_diff <= 0)[0]
+        if np.ndim(supply_temps) > 0:
+            supply_range = (
+                f"supply range [{np.min(supply_temps):.1f}, {np.max(supply_temps):.1f}]°C"
+            )
+        else:
+            supply_range = f"supply {float(supply_temps):.1f}°C"
         logger.warning(
-            f"COP calculation: {num_invalid} timestep(s) have outdoor temperature >= supply temperature. "
-            f"This is non-physical for heating mode. Indices: {invalid_indices.tolist()[:5]}{'...' if len(invalid_indices) > 5 else ''}. "
-            f"Supply temp: {supply_temperature:.1f}°C. Setting COP to 1.0 (direct electric heating) for these periods."
+            f"COP calculation: {num_invalid} timestep(s) have {invalid_relation}. "
+            f"This is non-physical for {mode_norm} mode. "
+            f"Indices: {invalid_indices.tolist()[:5]}{'...' if len(invalid_indices) > 5 else ''}. "
+            f"{supply_range}. Setting COP to 1.0 for these periods."
         )
 
-    # Vectorized Carnot-based COP calculation
-    # COP = carnot_efficiency × T_supply / (T_supply - T_outdoor)
-    # For non-physical cases (outdoor >= supply), we use a neutral COP of 1.0
-    # This prevents the optimizer from exploiting unrealistic high COP values
+    # Vectorized Carnot-based COP calculation.
+    # For non-physical cases (lift <= 0), use a neutral COP of 1.0.
 
     # Avoid division by zero: use a mask to only calculate for valid cases
     cop_values = np.ones_like(outdoor_temperature_kelvin)  # Default to 1.0 everywhere
     valid_mask = temperature_diff > 0
     if np.any(valid_mask):
-        cop_values[valid_mask] = (
-            carnot_efficiency * supply_temperature_kelvin / temperature_diff[valid_mask]
-        )
+        # supply_temperature_kelvin may be scalar or array - index when array.
+        if np.ndim(supply_temperature_kelvin) > 0:
+            supply_valid = supply_temperature_kelvin[valid_mask]
+        else:
+            supply_valid = supply_temperature_kelvin
+        cop_values[valid_mask] = carnot_efficiency * supply_valid / temperature_diff[valid_mask]
 
     # Apply realistic bounds: minimum 1.0, maximum 8.0
     # - Lower bound: 1.0 means direct electric heating (no efficiency gain)
@@ -235,6 +286,536 @@ def calculate_cop_heatpump(
     cop_values = np.clip(cop_values, 1.0, 8.0)
 
     return cop_values
+
+
+def apply_heating_curve(
+    heating_curve: dict,
+    outdoor_temperature_forecast: np.ndarray | pd.Series,
+) -> np.ndarray:
+    """Compute per-slot supply temperature from a weather-compensated heating curve.
+
+    A heating curve specifies how the heat source modulates its supply temperature in
+    response to outdoor temperature, the way every modern boiler / heat pump controller
+    does. The linear form supported here:
+
+        T_supply(t) = clip(offset - slope * T_outdoor(t), min_supply, max_supply)
+
+    :param heating_curve: dict with required ``slope`` and ``offset`` (both °C), plus
+        optional ``min_supply`` (default 25°C) and ``max_supply`` (default 70°C).
+    :param outdoor_temperature_forecast: Per-slot outdoor temperature in °C.
+    :return: Per-slot supply temperature array in °C.
+    """
+    slope = float(heating_curve["slope"])
+    offset = float(heating_curve["offset"])
+    min_supply = float(heating_curve.get("min_supply", 25.0))
+    max_supply = float(heating_curve.get("max_supply", 70.0))
+    if min_supply >= max_supply:
+        raise ValueError(
+            f"heating_curve: min_supply ({min_supply}) must be < max_supply ({max_supply})"
+        )
+    if isinstance(outdoor_temperature_forecast, pd.Series):
+        outdoor = outdoor_temperature_forecast.values
+    else:
+        outdoor = np.asarray(outdoor_temperature_forecast, dtype=float)
+    supply = offset - slope * outdoor
+    return np.clip(supply, min_supply, max_supply)
+
+
+def resolve_min_temperatures(
+    config: dict,
+    outdoor_temperature_forecast: np.ndarray | pd.Series | list | None,
+    length: int,
+) -> list[float]:
+    """Compute the effective per-slot lower temperature bound for a storage tank.
+
+    Combines two sources, taking the element-wise max so the more conservative
+    floor always wins:
+
+    1. Static ``min_temperatures`` (or ``min_temperature``) list - an absolute
+       weather-independent floor for safety / comfort. Always respected.
+    2. ``min_temperature_curve`` dict - a weather-compensated floor matching
+       the radiator emission law. Same shape as ``heating_curve``:
+       ``T = clip(offset - slope * T_outdoor, min_supply, max_supply)``.
+
+    When only one is set, that one is used. When neither is set, returns an
+    empty list (caller decides how to react).
+
+    :param config: Tank or thermal_battery dict potentially carrying
+        ``min_temperatures`` and/or ``min_temperature_curve``.
+    :param outdoor_temperature_forecast: Per-slot outdoor temperature. May be
+        ``None`` when only the static floor is configured.
+    :param length: Optimization horizon length.
+    :return: List of per-slot minimum temperatures (length = ``length``).
+    """
+    # Accept either the plural list form or a single scalar/list under the
+    # singular key. Normalize a scalar to a one-element list so the slicing
+    # / padding below works uniformly.
+    static = config.get("min_temperatures")
+    if static is None:
+        static = config.get("min_temperature")
+    if static is None:
+        static = []
+    elif isinstance(static, int | float):
+        static = [float(static)]
+    curve = config.get("min_temperature_curve")
+
+    if not static and not curve:
+        return []
+
+    if curve is not None:
+        if outdoor_temperature_forecast is None:
+            raise ValueError("min_temperature_curve requires outdoor_temperature_forecast")
+        curve_temps = apply_heating_curve(curve, outdoor_temperature_forecast)[:length]
+    else:
+        curve_temps = None
+
+    if static:
+        static_arr = np.asarray(list(static)[:length], dtype=float)
+        if len(static_arr) < length:
+            pad_value = static_arr[-1] if len(static_arr) else 20.0
+            static_arr = np.concatenate([static_arr, np.full(length - len(static_arr), pad_value)])
+    else:
+        static_arr = None
+
+    if curve_temps is not None and static_arr is not None:
+        effective = np.maximum(static_arr, curve_temps)
+    elif curve_temps is not None:
+        effective = curve_temps
+    else:
+        effective = static_arr
+
+    return [float(v) for v in effective]
+
+
+def resolve_thermal_battery_cop(
+    hc: dict,
+    outdoor_temperature_forecast: Sequence[float] | np.ndarray | pd.Series | None,
+    length: int | None = None,
+) -> np.ndarray:
+    """
+    Resolve the per-timestep energy-conversion factor for a thermal_battery heat source.
+
+    The thermal_battery model treats the conversion factor uniformly as a COP-like
+    multiplier on input power: `Q_thermal = COP * P_in / 1000 * dt`. Two source types
+    are supported:
+
+        - Heat pump (default): COP is computed via the Carnot formula and varies with
+            the outdoor temperature. Requires `supply_temperature` in `hc`; uses
+            `carnot_efficiency` (default 0.4). If `sense` is set to `"cool"`, cooling
+            Carnot lift is used (`T_outdoor - T_supply`).
+    - Constant-efficiency source (gas boiler, oil burner, district heating, etc.):
+      `efficiency` in `hc` is used as a flat conversion factor for every timestep.
+      `supply_temperature` is not required and outdoor temperature is ignored. The
+      constant value passes through Carnot bounds intentionally (typical 0.85-0.95
+      for combustion sources).
+
+    :param hc: The thermal_battery sub-config dict from def_load_config.
+    :param outdoor_temperature_forecast: Outdoor temperature forecast in degrees
+        Celsius. Required in heat-pump mode. In constant-efficiency mode it is
+        ignored and may be ``None`` provided ``length`` is given explicitly.
+    :param length: Number of timesteps in the returned array. Mandatory when
+        ``outdoor_temperature_forecast`` is ``None``; otherwise truncates or
+        passes through the forecast length when set, or returns the full forecast
+        length when unset.
+    :return: Numpy array of conversion factors, one per timestep.
+    """
+    if "efficiency" in hc and hc["efficiency"] is not None:
+        efficiency = float(hc["efficiency"])
+        if efficiency <= 0:
+            raise ValueError(f"thermal_battery 'efficiency' must be positive, got {efficiency}")
+        if length is None:
+            if outdoor_temperature_forecast is None:
+                raise ValueError(
+                    "resolve_thermal_battery_cop in constant-efficiency mode "
+                    "requires 'length' when outdoor_temperature_forecast is None"
+                )
+            length = len(outdoor_temperature_forecast)
+        return np.full(length, efficiency)
+
+    if outdoor_temperature_forecast is None:
+        raise ValueError(
+            "resolve_thermal_battery_cop in heat-pump mode requires outdoor_temperature_forecast"
+        )
+    # Heating-curve mode: per-slot supply T from outdoor T. Falls back to constant
+    # `supply_temperature` when no curve is configured.
+    heating_curve = hc.get("heating_curve")
+    if heating_curve:
+        supply_temperature = apply_heating_curve(heating_curve, outdoor_temperature_forecast)
+    else:
+        supply_temperature = hc.get("supply_temperature")
+        if supply_temperature is None:
+            raise ValueError(
+                "thermal_battery requires either 'efficiency' (constant-efficiency mode), "
+                "'supply_temperature' (constant heat-pump mode), or 'heating_curve' "
+                "(weather-compensated heat-pump mode)"
+            )
+    cops = calculate_cop_heatpump(
+        supply_temperature=supply_temperature,
+        carnot_efficiency=hc.get("carnot_efficiency", 0.4),
+        outdoor_temperature_forecast=outdoor_temperature_forecast,
+        mode=normalize_heat_cool_mode(
+            hc.get("sense") or "heat",
+            field_name="sense",
+            context="thermal_battery",
+        ),
+    )
+    return cops if length is None else cops[:length]
+
+
+def calculate_surface_solar_gain(
+    hc: dict,
+    ghi_forecast: np.ndarray | None,
+    optimization_time_step_minutes: float,
+    length: int | None = None,
+) -> np.ndarray | None:
+    """
+    Compute per-timestep solar energy absorbed by an exposed thermal mass surface.
+
+    Intended for thermal_battery configs that model a thermal store exposed
+    directly to sunlight (a pool, an outdoor tank, a solar-thermal collector
+    routed into a buffer). The gain is independent of the heater and acts
+    as a negative term on `heating_demand` (i.e. the optimizer needs less
+    pumped heat to maintain temperature when there is solar gain).
+
+    Reuses the existing GHI forecast that EMHASS already fetches for PV. No
+    second weather API call is required.
+
+    :param hc: The thermal_battery sub-config dict. Reads two keys:
+        - `solar_absorption_area`: effective horizontal absorption surface (m²).
+        - `solar_absorption_factor`: fraction of GHI absorbed by the thermal
+          mass (typical pool with no cover: 0.7-0.9; covered pool: 0.2-0.4).
+          Defaults to 0.7 if absent.
+    :param ghi_forecast: Global horizontal irradiance forecast in W/m² per
+        timestep. Pass None or zero-length array to skip gain.
+    :param optimization_time_step_minutes: Timestep duration in minutes.
+    :param length: Truncate / pad the returned array to this length.
+    :return: Solar gain in kWh per timestep, or None if not applicable.
+    """
+    absorption_area = hc.get("solar_absorption_area")
+    if absorption_area is None or float(absorption_area) <= 0:
+        return None
+    if ghi_forecast is None:
+        return None
+
+    ghi_arr = np.asarray(ghi_forecast, dtype=float)
+    if length is not None:
+        if len(ghi_arr) < length:
+            ghi_arr = np.concatenate((ghi_arr, np.zeros(length - len(ghi_arr))))
+        else:
+            ghi_arr = ghi_arr[:length]
+
+    absorption_factor = float(hc.get("solar_absorption_factor", 0.7))
+    if absorption_factor < 0:
+        raise ValueError(
+            f"thermal_battery solar_absorption_factor must be >= 0, got {absorption_factor}"
+        )
+    dt_hours = optimization_time_step_minutes / 60.0
+    # W/m² * m² * factor / 1000 (kW per W) * hours = kWh
+    return ghi_arr * float(absorption_area) * absorption_factor / 1000.0 * dt_hours
+
+
+def compile_heat_topology(topology: dict) -> dict:
+    """Compile a heat-topology graph descriptor into flat optim_conf fields.
+
+    The graph model lets users declare a small directed graph of
+    `sources`, `storage`, `consumers`, `flows`, and `actuator_groups`. This
+    function translates that high-level descriptor into the primitives the
+    optimizer already understands:
+
+    - Each `flow (source, storage)` becomes one deferrable load with a
+      `thermal_source` block in def_load_config.
+    - Each `storage` becomes one entry in `shared_thermal_tanks` with
+      `load_ids` pointing at the deferrable loads feeding it.
+    - Each `consumer` is folded into its target storage (its profile or
+      building model populates the storage's draw_off_demand / u_value etc.).
+    - Each `actuator_group` becomes one entry in `deferrable_load_groups`.
+    - Each source's `cost_track` reference resolves to an entry in
+      `cost_forecast_per_deferrable_load`.
+
+    Returns a dict of optim_conf fields to merge into the live optim_conf:
+        number_of_deferrable_loads, nominal_power_of_deferrable_loads,
+        minimum_power_of_deferrable_loads, treat_deferrable_load_as_semi_cont,
+        operating_hours_of_each_deferrable_load, def_load_config,
+        shared_thermal_tanks, deferrable_load_groups,
+        cost_forecast_per_deferrable_load.
+
+    Validation: missing source/storage references, duplicated ids, and
+    consumers targeting unknown storage all raise ValueError with the
+    offending field path.
+    """
+    if not isinstance(topology, dict) or not topology:
+        return {}
+    sources = topology.get("sources", []) or []
+    storage = topology.get("storage", []) or []
+    consumers = topology.get("consumers", []) or []
+    flows = topology.get("flows", []) or []
+    groups = topology.get("actuator_groups", []) or []
+    cost_tracks = topology.get("cost_tracks", {}) or {}
+
+    src_by_id = {s["id"]: s for s in sources}
+    src_index_by_id = {s["id"]: i for i, s in enumerate(sources)}
+    sto_by_id = {s["id"]: s for s in storage}
+    if len(src_by_id) != len(sources):
+        raise ValueError("heat_topology.sources contains duplicate ids")
+    if len(sto_by_id) != len(storage):
+        raise ValueError("heat_topology.storage contains duplicate ids")
+
+    # Validate flows reference real source/storage ids
+    for i, f in enumerate(flows):
+        if f.get("from") not in src_by_id:
+            raise ValueError(
+                f"heat_topology.flows[{i}].from='{f.get('from')}' does not match any source.id"
+            )
+        if f.get("to") not in sto_by_id:
+            raise ValueError(
+                f"heat_topology.flows[{i}].to='{f.get('to')}' does not match any storage.id"
+            )
+
+    # Validate consumers target real storage
+    for i, c in enumerate(consumers):
+        if c.get("target") not in sto_by_id:
+            raise ValueError(
+                f"heat_topology.consumers[{i}].target='{c.get('target')}' does not match any storage.id"
+            )
+
+    # Build deferrable loads from flows
+    num_loads = len(flows)
+    nominal_power = []
+    min_power = []
+    treat_semi_cont = []
+    operating_hours = []
+    def_load_config = []
+    cost_per_load: list = []
+    is_electric_load: list[bool] = []
+    flow_to_load_idx: dict[tuple[str, str], int] = {}
+
+    for i, f in enumerate(flows):
+        src = src_by_id[f["from"]]
+        nominal_power.append(float(src.get("nominal_power", 0)))
+        min_power.append(float(src.get("min_power", 0)))
+        treat_semi_cont.append(bool(src.get("treat_as_semi_cont", True)))
+        operating_hours.append(int(src.get("operating_hours", 4)))
+        # Source-side fields - shape expected by resolve_thermal_battery_cop
+        source_block: dict = {}
+        src_type = src.get("type", "").lower()
+        # Type -> default electric bus membership. Explicit `electric` flag wins.
+        type_is_electric = {
+            "heatpump": True,
+            "heat_pump": True,
+            "electric": True,
+            "gas": False,
+            "oil": False,
+            "district": False,
+            "constant_efficiency": True,  # ambiguous - default electric unless overridden
+        }
+        if src_type in {"heatpump", "heat_pump"}:
+            # Heating curve takes precedence; constant supply_temperature is the fallback.
+            if "heating_curve" in src and src["heating_curve"]:
+                hc_block = dict(src["heating_curve"])
+                # Validate required fields up-front so users get clear errors
+                for required in ("slope", "offset"):
+                    if required not in hc_block:
+                        raise ValueError(
+                            f"heat_topology.sources[{src['id']}].heating_curve missing "
+                            f"required field '{required}'"
+                        )
+                source_block["heating_curve"] = {
+                    "slope": float(hc_block["slope"]),
+                    "offset": float(hc_block["offset"]),
+                    "min_supply": float(hc_block.get("min_supply", 25.0)),
+                    "max_supply": float(hc_block.get("max_supply", 70.0)),
+                }
+            elif "supply_temperature" in src:
+                source_block["supply_temperature"] = float(src["supply_temperature"])
+            else:
+                raise ValueError(
+                    f"heat_topology.sources[{src['id']}] (type=heatpump) requires "
+                    "either 'supply_temperature' or 'heating_curve'"
+                )
+            source_block["carnot_efficiency"] = float(src.get("carnot_efficiency", 0.4))
+        elif src_type in {"gas", "oil", "district", "constant_efficiency", "electric"}:
+            source_block["efficiency"] = float(src["efficiency"])
+        else:
+            raise ValueError(
+                f"heat_topology.sources[{src_index_by_id[src['id']]}] "
+                f"(id='{src['id']}'): type='{src.get('type', '')}' is not "
+                "recognised. Allowed types: heatpump, heat_pump, gas, oil, "
+                "district, electric, constant_efficiency."
+            )
+        is_electric_load.append(bool(src.get("electric", type_is_electric.get(src_type, True))))
+        def_load_config.append({"thermal_source": source_block})
+        # Cost track resolution
+        cost_track_id = src.get("cost_track")
+        if cost_track_id is None:
+            cost_per_load.append(None)
+        else:
+            if cost_track_id not in cost_tracks:
+                raise ValueError(
+                    f"heat_topology.sources[{src['id']}].cost_track='{cost_track_id}' "
+                    "not found in cost_tracks"
+                )
+            cost_per_load.append(list(cost_tracks[cost_track_id]))
+        flow_to_load_idx[(f["from"], f["to"])] = i
+
+    # Aggregate consumer demand onto storage
+    storage_demand: dict[str, dict] = {}
+    for c in consumers:
+        target = c["target"]
+        if target not in storage_demand:
+            storage_demand[target] = {"profile": None, "building": None, "pool": None}
+        ctype = (c.get("type") or "").lower()
+        if ctype == "profile":
+            prof = list(c["profile"])
+            existing = storage_demand[target]["profile"]
+            if existing is None:
+                storage_demand[target]["profile"] = prof
+            else:
+                # Pad both lists to the common max length so a later profile
+                # that is longer than `existing` is not silently truncated by
+                # zip(). Demand after the shorter horizon stays at 0.
+                max_len = max(len(existing), len(prof))
+                existing_padded = existing + [0.0] * (max_len - len(existing))
+                prof_padded = prof + [0.0] * (max_len - len(prof))
+                storage_demand[target]["profile"] = [
+                    a + b for a, b in zip(existing_padded, prof_padded)
+                ]
+        elif ctype == "building_demand":
+            if storage_demand[target]["building"] is not None:
+                raise ValueError(
+                    f"heat_topology.consumers: storage '{target}' already has a "
+                    "building_demand consumer; only one is permitted per storage"
+                )
+            storage_demand[target]["building"] = {
+                k: c[k]
+                for k in (
+                    "u_value",
+                    "envelope_area",
+                    "ventilation_rate",
+                    "heated_volume",
+                    "indoor_target_temperature",
+                    "window_area",
+                    "shgc",
+                    "internal_gains_factor",
+                    "specific_heating_demand",
+                    "area",
+                    "base_temperature",
+                    "annual_reference_hdd",
+                )
+                if k in c
+            }
+        elif ctype == "pool_comfort":
+            storage_demand[target]["pool"] = {
+                k: c[k] for k in ("solar_absorption_area", "solar_absorption_factor") if k in c
+            }
+        else:
+            raise ValueError(
+                f"heat_topology.consumers[{c.get('id')}].type='{ctype}' must be one of "
+                "profile, building_demand, pool_comfort"
+            )
+
+    # Build shared_thermal_tanks from storage + aggregated demand + flows
+    shared_tanks = []
+    for s in storage:
+        sid = s["id"]
+        load_ids = [flow_to_load_idx[(f["from"], f["to"])] for f in flows if f["to"] == sid]
+        tank: dict = {
+            "id": sid,
+            "load_ids": load_ids,
+            "volume": float(s["volume"]),
+            "density": float(s.get("density", 1000)),
+            "heat_capacity": float(s.get("heat_capacity", 4.186)),
+            "start_temperature": float(s.get("start_temperature", 20.0)),
+            "thermal_loss": float(s.get("thermal_loss", 0.045)),
+            "min_temperatures": list(s.get("min_temperature", []))
+            or list(s.get("min_temperatures", [])),
+            "max_temperatures": list(s.get("max_temperature", []))
+            or list(s.get("max_temperatures", [])),
+        }
+        # Weather-compensated minimum temperature: when the radiator needs a higher
+        # supply T to keep up with building heat loss on a cold day, the buffer min
+        # should track. Same linear law as the source's heating_curve.
+        if "min_temperature_curve" in s and s["min_temperature_curve"]:
+            mc = dict(s["min_temperature_curve"])
+            for required in ("slope", "offset"):
+                if required not in mc:
+                    raise ValueError(
+                        f"heat_topology.storage[{sid}].min_temperature_curve "
+                        f"missing required field '{required}'"
+                    )
+            tank["min_temperature_curve"] = {
+                "slope": float(mc["slope"]),
+                "offset": float(mc["offset"]),
+                "min_supply": float(mc.get("min_supply", 25.0)),
+                "max_supply": float(mc.get("max_supply", 70.0)),
+            }
+        # Soft comfort constraints: penalize deviations from a target band rather than
+        # hard min/max. Accept either scalar `desired_temperature` (broadcast to horizon
+        # at solve time) or per-slot `desired_temperatures`. The optimizer's existing
+        # thermal_battery soft-constraint code reads these fields directly.
+        desired = s.get("desired_temperatures")
+        if desired is None and "desired_temperature" in s:
+            desired = s["desired_temperature"]
+        if desired is not None:
+            tank["desired_temperatures"] = (
+                list(desired) if isinstance(desired, list | tuple) else float(desired)
+            )
+        if "overshoot_temperature" in s:
+            tank["overshoot_temperature"] = float(s["overshoot_temperature"])
+        if "penalty_factor" in s:
+            tank["penalty_factor"] = float(s["penalty_factor"])
+        if "comfort_sense" in s:
+            sense = str(s["comfort_sense"]).lower()
+            if sense not in ("heat", "cool"):
+                raise ValueError(
+                    f"heat_topology.storage[{sid}].comfort_sense='{sense}' must be 'heat' or 'cool'"
+                )
+            tank["sense"] = sense
+        demand = storage_demand.get(sid, {})
+        if demand.get("profile") is not None:
+            tank["draw_off_demand"] = demand["profile"]
+        if demand.get("building"):
+            tank.update(demand["building"])
+        if demand.get("pool"):
+            tank.update(demand["pool"])
+        shared_tanks.append(tank)
+
+    # Build deferrable_load_groups from actuator_groups
+    def_groups = []
+    for gi, g in enumerate(groups):
+        names = []
+        for flow_pair in g.get("flows", []):
+            key = (flow_pair[0], flow_pair[1])
+            if key not in flow_to_load_idx:
+                raise ValueError(
+                    f"heat_topology.actuator_groups[{gi}].flows references unknown flow {flow_pair}"
+                )
+            names.append(f"deferrable{flow_to_load_idx[key]}")
+        def_group = {
+            "names": names,
+            "mutual_exclusion": bool(g.get("mutual_exclusion", False)),
+        }
+        if "max_combined_power" in g:
+            def_group["max_power"] = float(g["max_combined_power"])
+        def_groups.append(def_group)
+
+    return {
+        "number_of_deferrable_loads": num_loads,
+        "nominal_power_of_deferrable_loads": nominal_power,
+        "minimum_power_of_deferrable_loads": min_power,
+        "treat_deferrable_load_as_semi_cont": treat_semi_cont,
+        "operating_hours_of_each_deferrable_load": operating_hours,
+        "set_deferrable_load_single_constant": [False] * num_loads,
+        "set_deferrable_startup_penalty": [0.0] * num_loads,
+        "deferrable_load_max_cost": [0.0] * num_loads,
+        "set_deferrable_max_startups": [0] * num_loads,
+        "start_timesteps_of_each_deferrable_load": [0] * num_loads,
+        "end_timesteps_of_each_deferrable_load": [0] * num_loads,
+        "def_load_config": def_load_config,
+        "shared_thermal_tanks": shared_tanks,
+        "deferrable_load_groups": def_groups,
+        "cost_forecast_per_deferrable_load": cost_per_load,
+        "is_electric_load": is_electric_load,
+    }
 
 
 def calculate_thermal_loss_signed(
@@ -645,6 +1226,7 @@ async def treat_runtimeparams(
 
     # Some default data needed
     custom_deferrable_forecast_id = []
+    custom_deferrable_state_id = []
     custom_predicted_temperature_id = []
     custom_heating_demand_id = []
     for k in range(params["optim_conf"]["number_of_deferrable_loads"]):
@@ -654,6 +1236,14 @@ async def treat_runtimeparams(
                 "device_class": "power",
                 "unit_of_measurement": "W",
                 "friendly_name": f"Deferrable Load {k}",
+            }
+        )
+        custom_deferrable_state_id.append(
+            {
+                "entity_id": f"sensor.p_deferrable{k}_state",
+                "device_class": "enum",
+                "unit_of_measurement": "",
+                "friendly_name": f"Deferrable Load {k} Command",
             }
         )
         custom_predicted_temperature_id.append(
@@ -740,6 +1330,7 @@ async def treat_runtimeparams(
             "friendly_name": "Unit Prod Price",
         },
         "custom_deferrable_forecast_id": custom_deferrable_forecast_id,
+        "custom_deferrable_state_id": custom_deferrable_state_id,
         "custom_predicted_temperature_id": custom_predicted_temperature_id,
         "custom_heating_demand_id": custom_heating_demand_id,
         "publish_prefix": "",
@@ -925,11 +1516,39 @@ async def treat_runtimeparams(
 
         # MPC control case
         if set_type == "naive-mpc-optim":
-            if "prediction_horizon" not in runtimeparams.keys():
+            if (
+                "prediction_horizon" not in runtimeparams.keys()
+                or runtimeparams["prediction_horizon"] is None
+            ):
                 prediction_horizon = 10  # 10 time steps by default
             else:
                 prediction_horizon = runtimeparams["prediction_horizon"]
             params["passed_data"]["prediction_horizon"] = prediction_horizon
+            # Auto-extend the forecast window to cover the requested MPC horizon.
+            # forecast_dates was sized from delta_forecast_daily (default 1 day) above,
+            # before prediction_horizon was known; a longer horizon would otherwise be
+            # silently truncated by the [0:prediction_horizon] slice below, and the
+            # weather/Solcast fetch (which scales its request to the window length)
+            # would only pull 1 day. So grow the window to fit and rebuild it once.
+            steps_per_day = int(24 * 60 / optimization_time_step)
+            required_delta_forecast = max(
+                delta_forecast,
+                -(-int(prediction_horizon) // steps_per_day),  # ceil division
+            )
+            if required_delta_forecast > delta_forecast:
+                logger.info(
+                    "naive-mpc prediction_horizon=%s exceeds the %s-day forecast window; "
+                    "extending delta_forecast_daily to %s day(s) to cover the full horizon "
+                    "and its weather forecast.",
+                    prediction_horizon,
+                    delta_forecast,
+                    required_delta_forecast,
+                )
+                delta_forecast = required_delta_forecast
+                params["optim_conf"]["delta_forecast_daily"] = pd.Timedelta(days=delta_forecast)
+                forecast_dates = get_forecast_dates(
+                    optimization_time_step, delta_forecast, time_zone
+                )
             if "soc_init" not in runtimeparams.keys():
                 soc_init = params["plant_conf"]["battery_target_state_of_charge"]
             else:
@@ -958,6 +1577,19 @@ async def treat_runtimeparams(
                 )
                 soc_final = params["plant_conf"]["battery_maximum_state_of_charge"]
             params["passed_data"]["soc_final"] = soc_final
+            # Optional intermediate SOC target (issue #553). Both are runtime-only
+            # and default to None (no intermediate target); clamping/validation of
+            # the value and the timestep is handled in Optimization.perform_optimization.
+            params["passed_data"]["soc_target"] = runtimeparams.get("soc_target", None)
+            params["passed_data"]["soc_target_timestep"] = runtimeparams.get(
+                "soc_target_timestep", None
+            )
+            # Peak grid import already incurred this billing period (issue #623,
+            # Phase 2). Runtime-only, in Watts; defaults to None (no floor).
+            # Coercion/validation happens in Optimization.perform_optimization.
+            params["passed_data"]["current_period_peak"] = runtimeparams.get(
+                "current_period_peak", None
+            )
             if "operating_timesteps_of_each_deferrable_load" in runtimeparams.keys():
                 params["passed_data"]["operating_timesteps_of_each_deferrable_load"] = (
                     runtimeparams["operating_timesteps_of_each_deferrable_load"]
@@ -979,8 +1611,21 @@ async def treat_runtimeparams(
             forecast_dates = copy.deepcopy(forecast_dates)[0:prediction_horizon]
         else:
             params["passed_data"]["prediction_horizon"] = None
-            params["passed_data"]["soc_init"] = None
-            params["passed_data"]["soc_final"] = None
+            params["passed_data"]["soc_init"] = (
+                float(runtimeparams["soc_init"]) if "soc_init" in runtimeparams else None
+            )
+            params["passed_data"]["soc_final"] = (
+                float(runtimeparams["soc_final"]) if "soc_final" in runtimeparams else None
+            )
+            params["passed_data"]["soc_target"] = (
+                float(runtimeparams["soc_target"]) if "soc_target" in runtimeparams else None
+            )
+            params["passed_data"]["soc_target_timestep"] = (
+                int(runtimeparams["soc_target_timestep"])
+                if "soc_target_timestep" in runtimeparams
+                else None
+            )
+            params["passed_data"]["current_period_peak"] = None
 
         # Parsing the thermal model parameters
         # Load the default config
@@ -1106,6 +1751,9 @@ async def treat_runtimeparams(
         # Define Helper Functions
         def _cast_bool(value):
             """Helper to cast string inputs to boolean safely."""
+            # ast.literal_eval('None') returns None without raising — explicit guard needed.
+            if value is None:
+                return False
             try:
                 return ast.literal_eval(str(value).capitalize())
             except (ValueError, SyntaxError):
@@ -1144,6 +1792,7 @@ async def treat_runtimeparams(
             ("split_date_delta", "48h", None),
             ("n_trials", 10, int),
             ("perform_backtest", False, _cast_bool),
+            ("mlforecaster_weather_features", [], None),
         ]
 
         # Apply Configuration
@@ -1233,6 +1882,17 @@ async def treat_runtimeparams(
             weather_forecast_cache_only = runtimeparams["weather_forecast_cache_only"]
         params["passed_data"]["weather_forecast_cache_only"] = weather_forecast_cache_only
 
+        # Param to bypass PV-feedback mixing during curtailment events (#818)
+        if "ignore_pv_feedback_during_curtailment" not in runtimeparams.keys():
+            ignore_pv_feedback_during_curtailment = False
+        else:
+            ignore_pv_feedback_during_curtailment = bool(
+                runtimeparams["ignore_pv_feedback_during_curtailment"]
+            )
+        params["passed_data"]["ignore_pv_feedback_during_curtailment"] = (
+            ignore_pv_feedback_during_curtailment
+        )
+
         # A condition to manually save entity data under data_path/entities after optimization
         if "entity_save" not in runtimeparams.keys():
             entity_save = ""
@@ -1256,11 +1916,28 @@ async def treat_runtimeparams(
                     dcs = orjson.loads(dcs)
                 except Exception:
                     logger.warning(f"Could not parse def_current_state string: {dcs}")
-            # Check it's iterable before casting to bool
+            # Use _cast_bool (not bool()) so string 'False' → False, not True.
+            # bool('False') = True because non-empty strings are truthy in Python.
             if isinstance(dcs, list):
-                params["optim_conf"]["def_current_state"] = [bool(s) for s in dcs]
+                params["optim_conf"]["def_current_state"] = [_cast_bool(s) for s in dcs]
             else:
-                params["optim_conf"]["def_current_state"] = [bool(dcs)]
+                n_loads = len(params["optim_conf"]["nominal_power_of_deferrable_loads"])
+                params["optim_conf"]["def_current_state"] = [_cast_bool(dcs)] * n_loads
+
+        # set_deferrable_load_single_constant arrives via the generic associations.csv
+        # path as-is (may be a list of strings from runtimeparams JSON).  Apply the
+        # same _cast_bool coercion so 'False' → False, not True (#873, mirrors #876).
+        if "set_deferrable_load_single_constant" in runtimeparams.keys():
+            sdlsc = runtimeparams["set_deferrable_load_single_constant"]
+            if isinstance(sdlsc, list):
+                params["optim_conf"]["set_deferrable_load_single_constant"] = [
+                    _cast_bool(s) for s in sdlsc
+                ]
+            else:
+                n_loads = len(params["optim_conf"]["nominal_power_of_deferrable_loads"])
+                params["optim_conf"]["set_deferrable_load_single_constant"] = [
+                    _cast_bool(sdlsc)
+                ] * n_loads
 
         # Treat retrieve data from Home Assistant (retrieve_hass_conf) configuration parameters passed at runtime
         # Secrets passed at runtime
@@ -1328,6 +2005,63 @@ async def treat_runtimeparams(
     retrieve_hass_conf = params["retrieve_hass_conf"]
     optim_conf = params["optim_conf"]
     plant_conf = params["plant_conf"]
+
+    # If heat_topology is present (static config or runtime override), compile
+    # it down to flat optim_conf primitives. Runtime override wins over static
+    # config because runtimeparams have already been merged above.
+    heat_topology = optim_conf.get("heat_topology")
+    if isinstance(heat_topology, dict) and heat_topology:
+        try:
+            compiled = compile_heat_topology(heat_topology)
+        except ValueError as e:
+            logger.error("heat_topology compile failed: %s", e)
+            raise
+        # Merge compiled fields into optim_conf, allowing user-set fields to win
+        # for things the compiler always populates (e.g. operating_hours).
+        for key, val in compiled.items():
+            if key not in optim_conf or optim_conf[key] in (None, [], {}):
+                optim_conf[key] = val
+            else:
+                # For the structural fields we ALWAYS want compiled values
+                # (otherwise the compiled def_load_config doesn't match
+                # number_of_deferrable_loads, etc.)
+                if key in {
+                    "number_of_deferrable_loads",
+                    "def_load_config",
+                    "shared_thermal_tanks",
+                    "deferrable_load_groups",
+                    "nominal_power_of_deferrable_loads",
+                    "minimum_power_of_deferrable_loads",
+                    "treat_deferrable_load_as_semi_cont",
+                    "cost_forecast_per_deferrable_load",
+                    # All per-load arrays must match number_of_deferrable_loads,
+                    # which the compiler sets - so override any defaults.
+                    "set_deferrable_load_single_constant",
+                    "set_deferrable_startup_penalty",
+                    "deferrable_load_max_cost",
+                    "set_deferrable_max_startups",
+                    "operating_hours_of_each_deferrable_load",
+                    "start_timesteps_of_each_deferrable_load",
+                    "end_timesteps_of_each_deferrable_load",
+                    "is_electric_load",
+                }:
+                    optim_conf[key] = val
+        params["optim_conf"] = optim_conf
+        logger.info(
+            "heat_topology compiled: %d sources, %d storage, %d flows, %d groups",
+            len(heat_topology.get("sources", [])),
+            len(heat_topology.get("storage", [])),
+            len(heat_topology.get("flows", [])),
+            len(heat_topology.get("actuator_groups", [])),
+        )
+    elif heat_topology:
+        logger.warning(
+            "heat_topology is set but is %s, not a dict (value: %r). "
+            "Treating as 'no topology'. Use JSON null (not the string \"null\") "
+            "or omit the key to disable.",
+            type(heat_topology).__name__,
+            heat_topology,
+        )
 
     # Serialize the final params
     params = orjson.dumps(params, default=str).decode()
@@ -2163,6 +2897,13 @@ async def build_params(
             "set_deferrable_startup_penalty",
             logger,
         )
+        params["optim_conf"]["deferrable_load_max_cost"] = check_def_loads(
+            num_def_loads,
+            params["optim_conf"],
+            0.0,
+            "deferrable_load_max_cost",
+            logger,
+        )
         params["optim_conf"]["set_deferrable_max_startups"] = check_def_loads(
             num_def_loads,
             params["optim_conf"],
@@ -2308,6 +3049,9 @@ async def build_params(
         "prediction_horizon": None,
         "soc_init": None,
         "soc_final": None,
+        "soc_target": None,
+        "soc_target_timestep": None,
+        "current_period_peak": None,
         "operating_hours_of_each_deferrable_load": None,
         "start_timesteps_of_each_deferrable_load": None,
         "end_timesteps_of_each_deferrable_load": None,
@@ -2328,6 +3072,10 @@ def check_def_loads(
     """
     Check parameter lists with deferrable loads number, if they do not match, enlarge to fit.
 
+    A missing key or ``None`` value is filled with ``default`` for every load. ``parameter``
+    is updated in place (and the same list returned), matching how every call site reassigns
+    ``params["optim_conf"][name] = check_def_loads(...)``.
+
     :param num_def_loads: Total number deferrable loads
     :type num_def_loads: int
     :param parameter: parameter config dict containing paramater
@@ -2341,20 +3089,33 @@ def check_def_loads(
     :return: parameter list
     :rtype: list[dict]
     """
-    if (
-        parameter.get(parameter_name, None) is not None
-        and type(parameter[parameter_name]) is list
-        and num_def_loads > len(parameter[parameter_name])
-    ):
-        logger.warning(
+    current = parameter.get(parameter_name, None)
+    # Missing key or explicit JSON null: apply the default for every load. This is
+    # expected when a per-load array is absent from the user config (e.g. a parameter
+    # added in a later release), so do it silently rather than raising KeyError.
+    if current is None:
+        parameter[parameter_name] = [default] * num_def_loads
+        return parameter[parameter_name]
+    if isinstance(current, list) and num_def_loads > len(current):
+        # Enlarging a short list to match number_of_deferrable_loads is this function's
+        # documented job, not an error: the shipped defaults are sized for the default
+        # load count, so any user that raises the count without restating every per-load
+        # array lands here. Log at debug to avoid spurious startup warnings (#929).
+        logger.debug(
             parameter_name
-            + " does not match number in num_def_loads, adding default values ("
+            + " has fewer entries than number_of_deferrable_loads, padding with default ("
             + str(default)
-            + ") to parameter"
+            + ")"
         )
-        for _x in range(len(parameter[parameter_name]), num_def_loads):
-            parameter[parameter_name].append(default)
-    return parameter[parameter_name]
+        for _x in range(len(current), num_def_loads):
+            current.append(default)
+    result = parameter[parameter_name]
+    # Replace any None elements with the default (can occur when set-config
+    # receives a partial config, e.g. [null, 0] instead of [0, 0]).
+    if isinstance(result, list):
+        result = [v if v is not None else default for v in result]
+        parameter[parameter_name] = result
+    return result
 
 
 def get_days_list(days_to_retrieve: int) -> pd.DatetimeIndex:
@@ -2656,8 +3417,9 @@ def log_runtime_banner(logger, optim_conf: dict | None = None):
     """
     try:
         import platform as _plat
-        import cvxpy as _cvx
         from importlib.metadata import version as _pkg_version
+
+        import cvxpy as _cvx
 
         _ver = _pkg_version("emhass")
         if isinstance(optim_conf, dict):

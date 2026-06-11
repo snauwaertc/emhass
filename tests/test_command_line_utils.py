@@ -359,6 +359,60 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             "Summary line missing — expected one INFO record from orchestrator",
         )
 
+    # Test naive-mpc with prediction_horizon=72 auto-extends delta_forecast_daily to 2 days
+    async def test_naive_mpc_autoextends_horizon_end_to_end(self):
+        """Integration test: prediction_horizon=72 (36 h, 2 days at 30-min steps) with
+        NO delta_forecast_daily override must cause set_input_data_dict to bump
+        delta_forecast_daily from 1 → 2 days, give 72 forecast_dates, and let
+        naive_mpc_optim return a 72-row result with no NaNs."""
+        costfun = "profit"
+        action = "naive-mpc-optim"
+        # 72 elements: forecast lists must cover the full 72-step horizon
+        runtimeparams = {
+            "prediction_horizon": 72,
+            "pv_power_forecast": list(range(1, 73)),
+            "load_power_forecast": list(range(1, 73)),
+            "load_cost_forecast": [0.15] * 72,
+            "prod_price_forecast": [0.05] * 72,
+        }
+        runtimeparams_json = orjson.dumps(runtimeparams).decode("utf-8")
+        params = copy.deepcopy(await TestCommandLineAsyncUtils.get_test_params(set_use_pv=True))
+        params["passed_data"] = runtimeparams
+        params_json = orjson.dumps(params).decode("utf-8")
+
+        idd = await set_input_data_dict(
+            emhass_conf,
+            costfun,
+            params_json,
+            runtimeparams_json,
+            action,
+            logger,
+            get_data_from_file=True,
+        )
+        self.assertIsInstance(idd, dict)
+
+        # THE KEY INVARIANT: delta_forecast_daily bumped to 2 days by the auto-extend logic
+        self.assertEqual(
+            idd["fcst"].optim_conf["delta_forecast_daily"].days,
+            2,
+            "delta_forecast_daily must be bumped to 2 days to cover a 72-step horizon",
+        )
+        # forecast_dates must cover the full 72-step window
+        self.assertEqual(
+            len(idd["fcst"].forecast_dates),
+            72,
+            f"forecast_dates must have exactly 72 entries; got {len(idd['fcst'].forecast_dates)}",
+        )
+
+        opt_res = await naive_mpc_optim(idd, logger, debug=True)
+        self.assertIsInstance(opt_res, pd.DataFrame)
+        self.assertEqual(len(opt_res), 72, f"opt_res must have 72 rows; got {len(opt_res)}")
+        self.assertEqual(
+            opt_res.isnull().sum().sum(),
+            0,
+            "opt_res must contain no NaN values",
+        )
+
     # Test naive mpc optimization
     async def test_naive_mpc_optim(self):
         # Test mpc optimization
@@ -2049,6 +2103,52 @@ class TestCommandLineTimezoneLogic(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class TestSchemaVersion(unittest.IsolatedAsyncioTestCase):
+    """Cover EMHASS_SCHEMA_VERSION constant and the publish_data early-return attach."""
+
+    def test_constant_value(self):
+        from emhass.command_line import EMHASS_SCHEMA_VERSION
+
+        self.assertEqual(EMHASS_SCHEMA_VERSION, "1.0")
+
+    async def test_publish_data_attaches_schema_version_on_saved_entities_path(self):
+        from emhass.command_line import EMHASS_SCHEMA_VERSION
+
+        mock_df = pd.DataFrame({"P_grid": [0.0]})
+        with (
+            patch(
+                "emhass.command_line._get_params",
+                return_value={"passed_data": {"publish_prefix": "test_"}},
+            ),
+            patch(
+                "emhass.command_line._publish_from_saved_entities",
+                new=AsyncMock(return_value=mock_df),
+            ),
+        ):
+            result = await publish_data({}, logger)
+        self.assertEqual(result.attrs["emhass_schema_version"], EMHASS_SCHEMA_VERSION)
+
+
+class TestPublishInfeasibleGuard(unittest.IsolatedAsyncioTestCase):
+    """Regression test for #875.
+
+    When the optimization comes back infeasible, perform_optimization returns a
+    frame containing only the optim_status column. publish_data used to crash with
+    KeyError: 'P_Load' (reported by g1za and ztega). It should now log and return
+    None instead.
+    """
+
+    async def test_publish_data_infeasible_returns_none(self):
+        idx = pd.date_range("2024-01-01", periods=3, freq="30min", tz="UTC")
+        infeasible_res = pd.DataFrame({"optim_status": ["Infeasible"] * 3}, index=idx)
+        with patch(
+            "emhass.command_line._get_params",
+            return_value={"passed_data": {"publish_prefix": ""}},
+        ):
+            result = await publish_data({}, logger, opt_res_latest=infeasible_res)
+        self.assertIsNone(result)
+
+
 class TestOptimizationCache(unittest.TestCase):
     """Unit tests for the OptimizationCache warm-starting functionality."""
 
@@ -2292,6 +2392,45 @@ class TestOptimizationCache(unittest.TestCase):
         )
 
         # Should still return cached object since operating hours are parameterized
+        self.assertEqual(result, mock_opt)
+
+    def test_cache_hit_operating_timesteps_changed(self):
+        """Test that changing operating timesteps does NOT invalidate the cache.
+
+        operating_timesteps_of_each_deferrable_load is parameterised via
+        param_target_energy and param_required_timesteps (see optimization.py
+        ~line 2980-3007). Small tick-to-tick shifts in the operating-time
+        requirement (e.g. hot-water-hours-needed translating to 37 vs 38
+        timesteps) should NOT trigger a problem rebuild. This is a regression
+        test for the fix that added operating_timesteps to
+        optim_conf_runtime_keys.
+        """
+        mock_opt = MagicMock()
+        OptimizationCache.put(
+            mock_opt,
+            self.optim_conf,
+            self.plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.logger,
+        )
+
+        # Modify operating timesteps for load 1
+        modified_optim_conf = copy.deepcopy(self.optim_conf)
+        modified_optim_conf["operating_timesteps_of_each_deferrable_load"] = [
+            6,
+            16,
+        ]  # was implicit/None before, now varies
+
+        result = OptimizationCache.get(
+            modified_optim_conf,
+            self.plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.logger,
+        )
+
+        # Should still return cached object since operating timesteps are parameterized
         self.assertEqual(result, mock_opt)
 
     def test_cache_hit_start_timestep_changed(self):
@@ -3942,8 +4081,13 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opt_2.param_def_current_state[0].value, 1.0)
         self.assertEqual(opt_2.param_def_current_state[1].value, 0.0)
 
-    async def test_cache_miss_on_battery_power_limit_change(self):
-        """Test that changing battery_discharge_power_max causes cache MISS (via plant_conf_hash)."""
+    async def test_cache_hit_on_battery_power_limit_change(self):
+        """Test that changing battery_discharge_power_max keeps cache HIT.
+
+        Both battery power limits live in plant_runtime_keys and are wired
+        through to cp.Parameters whose .value is updated per solve, so a
+        change shouldn't invalidate the cached Optimization instance.
+        """
         base_rt = {
             "pv_power_forecast": [100 * (i + 1) for i in range(10)],
             "load_power_forecast": [200] * 10,
@@ -3957,7 +4101,9 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         opt_1 = (await self._run_set_input(base_rt))["opt"]
         opt_2 = (await self._run_set_input({**base_rt, "battery_discharge_power_max": 9999}))["opt"]
 
-        self.assertIsNot(opt_1, opt_2, "battery_discharge_power_max change must cause cache MISS")
+        self.assertIs(opt_1, opt_2, "battery_discharge_power_max change must keep cache HIT")
+        # And the new value has been propagated to the CVXPY Parameter
+        self.assertAlmostEqual(float(opt_2.param_battery_discharge_power_max.value), 9999.0)
 
 
 if __name__ == "__main__":

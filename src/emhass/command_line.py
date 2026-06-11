@@ -8,6 +8,7 @@ import os
 import pathlib
 import pickle
 import threading
+import time as _time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
@@ -17,18 +18,50 @@ import numpy as np
 import orjson
 import pandas as pd
 
-from emhass import utils
-from emhass.utils import log_runtime_banner, stage_timer
+from emhass import last_run, utils
 from emhass.forecast import Forecast
 from emhass.machine_learning_forecaster import MLForecaster
 from emhass.machine_learning_regressor import MLRegressor
 from emhass.optimization import Optimization
 from emhass.retrieve_hass import RetrieveHass
+from emhass.utils import log_runtime_banner, stage_timer
 
 default_csv_filename = "opt_res_latest.csv"
 default_pkl_suffix = "_mlf.pkl"
 default_metadata_json = "metadata.json"
 test_df_literal = "test_df_final.pkl"
+EMHASS_SCHEMA_VERSION = "1.0"
+
+
+def _record_optim_snapshot(
+    input_data_dict: dict,
+    action: str,
+    opt_res,
+    t0_monotonic: float,
+    logger: logging.Logger,
+) -> None:
+    """Persist a last_run snapshot after an optim wrapper completes.
+
+    Best-effort: any failure is logged with a traceback but does not
+    propagate so the wrapper's return path stays intact.
+    """
+    try:
+        optim_status = (
+            opt_res["optim_status"].iloc[0]
+            if isinstance(opt_res, pd.DataFrame) and "optim_status" in opt_res
+            else "Unknown"
+        )
+        last_run.record(
+            input_data_dict["emhass_conf"]["data_path"],
+            action=action,
+            stage_times=input_data_dict["stage_times"],
+            optim_status=optim_status,
+            infeasible=(optim_status == "Infeasible"),
+            duration_total_seconds=_time.monotonic() - t0_monotonic,
+            schema_version=EMHASS_SCHEMA_VERSION,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("last_run: failed to record %s snapshot", action, exc_info=exc)
 
 
 @dataclass
@@ -119,11 +152,14 @@ class OptimizationCacheKey:
     treat_deferrable_load_as_semi_cont: tuple
     set_deferrable_load_single_constant: tuple
     set_deferrable_startup_penalty: tuple
+    deferrable_load_max_cost: tuple
     set_deferrable_max_startups: tuple
     set_deferrable_load_as_timeseries: tuple
     nominal_power_of_deferrable_loads: tuple
     def_load_config_structure: tuple  # (index, type) tuples for each load
     deferrable_load_groups: tuple
+    shared_thermal_tanks: tuple  # shared-tank multi-source topology structure
+    is_electric_load: tuple  # per-load electric-bus membership flag
     inverter_is_hybrid: bool
     compute_curtailment: bool
     optimization_time_step_s: float | None
@@ -219,16 +255,27 @@ class OptimizationCache:
         plant_runtime_keys = {
             "soc_init",
             "battery_target_state_of_charge",
+            "battery_charge_power_max",
+            "battery_discharge_power_max",
         }
         # Optim conf parameters that don't affect problem structure
         # (parameterized via CVXPY Parameters, solver options, or forecast method selection)
         optim_conf_runtime_keys = {
             # Parameterized via CVXPY Parameters
             "operating_hours_of_each_deferrable_load",
+            "operating_timesteps_of_each_deferrable_load",
             "start_timesteps_of_each_deferrable_load",
             "end_timesteps_of_each_deferrable_load",
             "def_current_state",
             "minimum_power_of_deferrable_loads",
+            "cost_forecast_per_deferrable_load",
+            # shared_thermal_tanks has its own structural hash field above
+            "shared_thermal_tanks",
+            # heat_topology is compiled down to the structural fields which ARE
+            # part of the cache key (def_load_config_structure,
+            # deferrable_load_groups, shared_thermal_tanks). The raw
+            # heat_topology itself is excluded to avoid double-counting.
+            "heat_topology",
             # Solver options (updated on cache hit)
             "lp_solver_timeout",
             "lp_solver_mip_rel_gap",
@@ -276,6 +323,7 @@ class OptimizationCache:
             set_deferrable_startup_penalty=to_tuple(
                 optim_conf.get("set_deferrable_startup_penalty", [])
             ),
+            deferrable_load_max_cost=to_tuple(optim_conf.get("deferrable_load_max_cost", [])),
             set_deferrable_max_startups=to_tuple(optim_conf.get("set_deferrable_max_startups", [])),
             set_deferrable_load_as_timeseries=to_tuple(
                 optim_conf.get("set_deferrable_load_as_timeseries", [])
@@ -291,6 +339,25 @@ class OptimizationCache:
                 (tuple(g.get("names", [])), g.get("max_power"), g.get("mutual_exclusion", False))
                 for g in optim_conf.get("deferrable_load_groups", [])
             ),
+            # shared_thermal_tanks change problem structure (new tank state
+            # variable + dynamics constraints), so include a structure hash.
+            shared_thermal_tanks=tuple(
+                (
+                    t.get("id", ""),
+                    tuple(int(k) for k in t.get("load_ids", [])),
+                    config_hash(
+                        {
+                            k: v
+                            for k, v in t.items()
+                            if k not in {"start_temperature", "draw_off_demand"}
+                        },
+                    ),
+                )
+                for t in optim_conf.get("shared_thermal_tanks", []) or []
+            ),
+            # is_electric_load changes p_def_sum membership, hence the electric
+            # power balance shape, hence structural.
+            is_electric_load=to_tuple(optim_conf.get("is_electric_load", [])),
             inverter_is_hybrid=plant_conf.get("inverter_is_hybrid", False),
             compute_curtailment=plant_conf.get("compute_curtailment", False),
             optimization_time_step_s=to_seconds(retrieve_hass_conf.get("optimization_time_step")),
@@ -572,9 +639,17 @@ async def _retrieve_and_fit_pv_model(
         return False
     # Call data preparation method
     fcst.adjust_pv_forecast_data_prep(df_input_data)
+    n_splits = 5
+    x_adjust_pv = getattr(fcst, "x_adjust_pv", None)
+    if x_adjust_pv is not None and len(x_adjust_pv) <= n_splits:
+        fcst.logger.warning(
+            f"Not enough data to fit the PV model (found {len(x_adjust_pv)} samples, "
+            f"require > {n_splits}). Falling back to unadjusted PV forecast."
+        )
+        return False
     # Call the fit method
     await fcst.adjust_pv_forecast_fit(
-        n_splits=5,
+        n_splits=n_splits,
         regression_model=optim_conf["adjusted_pv_regression_model"],
     )
     return True
@@ -636,7 +711,10 @@ async def adjust_pv_forecast(
             test_df_literal,
         )
         if not success:
-            return False
+            logger.warning(
+                "Could not train adjusted PV model, falling back to unadjusted PV forecast."
+            )
+            return p_pv_forecast
     else:
         # Load existing model
         logger.info("Loading existing adjusted PV model from file")
@@ -660,8 +738,10 @@ async def adjust_pv_forecast(
                 test_df_literal,
             )
             if not success:
-                logger.error("Failed to retrieve data for model re-fit after load error")
-                return False
+                logger.error(
+                    "Failed to retrieve data for model re-fit after load error. Falling back to unadjusted forecast."
+                )
+                return p_pv_forecast
             logger.info("Successfully re-fitted model after load failure")
         except Exception as e:
             logger.error(
@@ -736,6 +816,7 @@ def _apply_df_freq_horizon(
         step = retrieve_hass_conf["optimization_time_step"]
         if not isinstance(step, pd._libs.tslibs.timedeltas.Timedelta):
             step = pd.to_timedelta(step, "minute")
+        df = df[~df.index.duplicated(keep="last")]
         df = df.asfreq(step)
     else:
         df = utils.set_df_index_freq(df)
@@ -1039,10 +1120,19 @@ async def set_input_data_dict(
     if isinstance(params, str):
         params = dict(orjson.loads(params))
     costfun = optim_conf.get("costfun", costfun)
-    # Actions that don't require building an Optimization object
-    # publish-data only reads saved results and posts to Home Assistant
-    actions_without_optimization = ["publish-data", "export-influxdb-to-csv"]
-    if set_type in actions_without_optimization:
+    # Two-tier guard:
+    #   - actions_without_fcst_or_opt: read saved results only; build neither.
+    #   - actions_skip_optim_cache: need a Forecast object but no Optimization.
+    #     Keeping these out of the OptimizationCache path stops them poisoning
+    #     the cache key with config-default values that a subsequent
+    #     naive-mpc-optim call would then miss against.
+    actions_without_fcst_or_opt = ["publish-data", "export-influxdb-to-csv"]
+    actions_skip_optim_cache = [
+        "forecast-model-fit",
+        "forecast-model-predict",
+        "forecast-model-tune",
+    ]
+    if set_type in actions_without_fcst_or_opt:
         fcst = None
         opt = None
         logger.debug(f"Skipping Optimization creation for action: {set_type}")
@@ -1056,51 +1146,59 @@ async def set_input_data_dict(
             logger,
             get_data_from_file=get_data_from_file,
         )
-        # Try to get cached Optimization object for warm-starting
-        _num_ts = len(fcst.forecast_dates)
-        opt = OptimizationCache.get(
-            optim_conf, plant_conf, costfun, retrieve_hass_conf, logger, _num_ts
-        )
-        if opt is None:
-            # Cache miss - create new Optimization object
-            opt = Optimization(
-                retrieve_hass_conf,
-                optim_conf,
-                plant_conf,
-                fcst.var_load_cost,
-                fcst.var_prod_price,
-                costfun,
-                emhass_conf,
-                logger,
-                num_timesteps=_num_ts,
-            )
-            # Store in cache for future warm-starts
-            OptimizationCache.put(
-                opt, optim_conf, plant_conf, costfun, retrieve_hass_conf, logger, _num_ts
-            )
+        if set_type in actions_skip_optim_cache:
+            opt = None
+            logger.debug(f"Skipping OptimizationCache for action: {set_type}")
         else:
-            # Cache hit - update references that may have changed
-            # (logger, var names from forecast, and runtime-configurable optim_conf values)
-            opt.logger = logger
-            opt.var_load_cost = fcst.var_load_cost
-            opt.var_prod_price = fcst.var_prod_price
-            # Update internal config dictionaries to prevent stale lookups
-            # for runtime parameters (like battery_target_state_of_charge)
-            opt.plant_conf = plant_conf
-            opt.optim_conf = optim_conf
-            # Update CVXPY Parameters for thermal start temperatures
-            # This is critical: updating optim_conf alone doesn't change baked-in constraint values
-            opt.update_thermal_start_temps(optim_conf)
-        # Update runtime-configurable solver options from optim_conf
-        # These don't affect problem structure, so they're safe to update on cached object
-        runtime_solver_opts = [
-            "lp_solver_timeout",
-            "lp_solver_mip_rel_gap",
-            "num_threads",
-        ]
-        for key in runtime_solver_opts:
-            if key in optim_conf:
-                opt.optim_conf[key] = optim_conf[key]
+            # Try to get cached Optimization object for warm-starting
+            _num_ts = len(fcst.forecast_dates)
+            opt = OptimizationCache.get(
+                optim_conf, plant_conf, costfun, retrieve_hass_conf, logger, _num_ts
+            )
+            if opt is None:
+                # Cache miss - create new Optimization object
+                opt = Optimization(
+                    retrieve_hass_conf,
+                    optim_conf,
+                    plant_conf,
+                    fcst.var_load_cost,
+                    fcst.var_prod_price,
+                    costfun,
+                    emhass_conf,
+                    logger,
+                    num_timesteps=_num_ts,
+                )
+                # Store in cache for future warm-starts
+                OptimizationCache.put(
+                    opt, optim_conf, plant_conf, costfun, retrieve_hass_conf, logger, _num_ts
+                )
+            else:
+                # Cache hit - update references that may have changed
+                # (logger, var names from forecast, and runtime-configurable optim_conf values)
+                opt.logger = logger
+                opt.var_load_cost = fcst.var_load_cost
+                opt.var_prod_price = fcst.var_prod_price
+                # Update internal config dictionaries to prevent stale lookups
+                # for runtime parameters (like battery_target_state_of_charge)
+                opt.plant_conf = plant_conf
+                opt.optim_conf = optim_conf
+                # Update CVXPY Parameters for thermal start temperatures
+                # This is critical: updating optim_conf alone doesn't change baked-in constraint values
+                opt.update_thermal_start_temps(optim_conf)
+                # Same idea for battery power limits — they participate in
+                # constraints via cp.Parameter and need the runtime value
+                # propagated even on a cache hit.
+                opt.update_battery_power_limits(plant_conf)
+            # Update runtime-configurable solver options from optim_conf
+            # These don't affect problem structure, so they're safe to update on cached object
+            runtime_solver_opts = [
+                "lp_solver_timeout",
+                "lp_solver_mip_rel_gap",
+                "num_threads",
+            ]
+            for key in runtime_solver_opts:
+                if key in optim_conf:
+                    opt.optim_conf[key] = optim_conf[key]
     # Create SetupContext
     ctx = SetupContext(
         retrieve_hass_conf=retrieve_hass_conf,
@@ -1258,6 +1356,7 @@ async def perfect_forecast_optim(
     :rtype: pd.DataFrame
 
     """
+    _t0 = _time.monotonic()
     logger.info("Performing perfect forecast optimization")
     # Load cost and prod price forecast
     with stage_timer(input_data_dict["stage_times"], "price_prep", logger):
@@ -1303,6 +1402,7 @@ async def perfect_forecast_optim(
             await publish_data(input_data_dict, logger, entity_save=True, dont_post=True)
 
     _log_optimization_summary(input_data_dict, logger)
+    _record_optim_snapshot(input_data_dict, last_run.ACTION_PERFECT_OPTIM, opt_res, _t0, logger)
 
     return opt_res
 
@@ -1471,7 +1571,9 @@ async def dayahead_forecast_optim(
     :rtype: pd.DataFrame
 
     """
-    logger.info("Performing day-ahead forecast optimization")
+    _t0 = _time.monotonic()
+    soc_init = input_data_dict["params"]["passed_data"].get("soc_init")
+    logger.info(f"Performing day-ahead forecast optimization with soc_init: {soc_init}")
     # Prepare forecast data with costs, prices, outdoor temp, and GHI
     with stage_timer(input_data_dict["stage_times"], "price_prep", logger):
         df_input_data_dayahead = prepare_forecast_and_weather_data(
@@ -1484,6 +1586,8 @@ async def dayahead_forecast_optim(
             df_input_data_dayahead,
             input_data_dict["p_pv_forecast"],
             input_data_dict["p_load_forecast"],
+            soc_init=soc_init,
+            stage_times=input_data_dict["stage_times"],
         )
     # Save CSV file for publish_data
     if save_data_to_file:
@@ -1511,6 +1615,9 @@ async def dayahead_forecast_optim(
             await publish_data(input_data_dict, logger, entity_save=True, dont_post=True)
 
     _log_optimization_summary(input_data_dict, logger)
+    _record_optim_snapshot(
+        input_data_dict, last_run.ACTION_DAYAHEAD_OPTIM, opt_res_dayahead, _t0, logger
+    )
 
     return opt_res_dayahead
 
@@ -1536,6 +1643,7 @@ async def naive_mpc_optim(
     :rtype: pd.DataFrame
 
     """
+    _t0 = _time.monotonic()
     logger.info("Performing naive MPC optimization")
     # Prepare forecast data with costs, prices, outdoor temp, and GHI (with resolution warning)
     with stage_timer(input_data_dict["stage_times"], "price_prep", logger):
@@ -1551,18 +1659,21 @@ async def naive_mpc_optim(
     )
     soc_init = input_data_dict["params"]["passed_data"]["soc_init"]
     soc_final = input_data_dict["params"]["passed_data"]["soc_final"]
+    soc_target = input_data_dict["params"]["passed_data"].get("soc_target", None)
+    soc_target_timestep = input_data_dict["params"]["passed_data"].get("soc_target_timestep", None)
+    current_period_peak = input_data_dict["params"]["passed_data"].get("current_period_peak", None)
     def_total_hours = input_data_dict["params"]["optim_conf"].get(
         "operating_hours_of_each_deferrable_load", None
     )
     def_total_timestep = input_data_dict["params"]["optim_conf"].get(
         "operating_timesteps_of_each_deferrable_load", None
     )
-    def_start_timestep = input_data_dict["params"]["optim_conf"][
+    def_start_timestep = input_data_dict["params"]["optim_conf"].get(
         "start_timesteps_of_each_deferrable_load"
-    ]
-    def_end_timestep = input_data_dict["params"]["optim_conf"][
+    )
+    def_end_timestep = input_data_dict["params"]["optim_conf"].get(
         "end_timesteps_of_each_deferrable_load"
-    ]
+    )
     with stage_timer(input_data_dict["stage_times"], "optim_solve", logger):
         opt_res_naive_mpc = input_data_dict["opt"].perform_naive_mpc_optim(
             df_input_data_dayahead,
@@ -1571,10 +1682,14 @@ async def naive_mpc_optim(
             prediction_horizon,
             soc_init,
             soc_final,
-            def_total_hours,
-            def_total_timestep,
-            def_start_timestep,
-            def_end_timestep,
+            soc_target=soc_target,
+            soc_target_timestep=soc_target_timestep,
+            current_period_peak=current_period_peak,
+            def_total_hours=def_total_hours,
+            def_total_timestep=def_total_timestep,
+            def_start_timestep=def_start_timestep,
+            def_end_timestep=def_end_timestep,
+            stage_times=input_data_dict["stage_times"],
         )
     # Save CSV file for publish_data
     if save_data_to_file:
@@ -1602,8 +1717,33 @@ async def naive_mpc_optim(
             await publish_data(input_data_dict, logger, entity_save=True, dont_post=True)
 
     _log_optimization_summary(input_data_dict, logger)
+    _record_optim_snapshot(
+        input_data_dict, last_run.ACTION_NAIVE_MPC_OPTIM, opt_res_naive_mpc, _t0, logger
+    )
 
     return opt_res_naive_mpc
+
+
+def _get_weather_features(input_data_dict: dict) -> list[str]:
+    """Read the configured mlforecaster weather covariate columns (empty when unset)."""
+    return list(input_data_dict["params"]["passed_data"].get("mlforecaster_weather_features") or [])
+
+
+async def _attach_weather_covariates(
+    input_data_dict: dict, data: pd.DataFrame, weather_features: list[str], logger: logging.Logger
+) -> pd.DataFrame:
+    """Attach the configured weather covariate columns onto a load DataFrame (in place, returned).
+
+    Used for the training data (fit/tune) so the columns are aligned to the load history. A no-op
+    that returns ``data`` unchanged when no ``weather_features`` are configured.
+    """
+    if not weather_features:
+        return data
+    covariates = await input_data_dict["fcst"].get_weather_covariates(data.index, weather_features)
+    for column in weather_features:
+        data[column] = covariates[column].to_numpy()
+    logger.info("Attached %s weather covariate(s) to the load data", len(weather_features))
+    return data
 
 
 async def forecast_model_fit(
@@ -1627,6 +1767,9 @@ async def forecast_model_fit(
     num_lags = input_data_dict["params"]["passed_data"]["num_lags"]
     split_date_delta = input_data_dict["params"]["passed_data"]["split_date_delta"]
     perform_backtest = input_data_dict["params"]["passed_data"]["perform_backtest"]
+    # Optionally attach weather covariates (aligned to the load history) for the model to use.
+    weather_features = _get_weather_features(input_data_dict)
+    data = await _attach_weather_covariates(input_data_dict, data, weather_features, logger)
     # The ML forecaster object
     mlf = MLForecaster(
         data,
@@ -1636,6 +1779,7 @@ async def forecast_model_fit(
         num_lags,
         input_data_dict["emhass_conf"],
         logger,
+        weather_features=weather_features,
     )
     # Fit the ML model
     df_pred, df_pred_backtest = await mlf.fit(
@@ -1700,7 +1844,10 @@ async def forecast_model_predict(
         data_last_window = copy.deepcopy(input_data_dict["df_input_data"])
     else:
         data_last_window = None
-    predictions = await mlf.predict(data_last_window)
+    # When the model was trained with weather covariates, supply the future weather over the
+    # forecast horizon so the recursive predict has the exog columns it expects.
+    weather_future = await input_data_dict["fcst"]._build_weather_future(data_last_window, mlf)
+    predictions = await mlf.predict(data_last_window, weather_future=weather_future)
     # Publish data to a Home Assistant sensor
     model_predict_publish = input_data_dict["params"]["passed_data"]["model_predict_publish"]
     model_predict_entity_id = input_data_dict["params"]["passed_data"]["model_predict_entity_id"]
@@ -2235,6 +2382,96 @@ async def _publish_deferrable_loads(ctx: PublishContext, opt_res_latest: pd.Data
     return cols
 
 
+# Fraction of nominal power below which a deferrable load is treated as idle
+# ('off') and at/above which it is treated as fully on. Scaling the bands with
+# nominal_power keeps the labels meaningful for both small and large loads.
+_DEFERRABLE_OFF_FRACTION = 0.01
+_DEFERRABLE_ON_FRACTION = 0.99
+# Floor for the 'off' band (in W) used when nominal_power is unknown/non-positive,
+# so a tiny solver residual still reads as 'off'.
+_DEFERRABLE_OFF_FLOOR_W = 1.0
+
+
+def _deferrable_power_to_state(power: float, nominal_power: float) -> str:
+    """Map a scheduled deferrable power to an interpretable command label.
+
+    Generic and convention-free: 'off' when the load is essentially idle, 'on'
+    when it runs at (near) its nominal power, and 'variable' for any modulated
+    level in between. Users layer their own logic (e.g. mapping 'on' to a switch)
+    on top of this label rather than re-deriving it from the raw power forecast.
+
+    The 'off' and 'on' bands are derived from ``nominal_power`` so they scale with
+    the load; when ``nominal_power`` is unknown the 'off' band falls back to a
+    small fixed floor and only 'off'/'variable' can be distinguished.
+    """
+    if not np.isfinite(power):
+        return "off"
+    if nominal_power and nominal_power > 0:
+        off_threshold = max(_DEFERRABLE_OFF_FRACTION * nominal_power, _DEFERRABLE_OFF_FLOOR_W)
+        if power <= off_threshold:
+            return "off"
+        if power >= _DEFERRABLE_ON_FRACTION * nominal_power:
+            return "on"
+        return "variable"
+    # Nominal power unknown: only the idle floor is meaningful.
+    if power <= _DEFERRABLE_OFF_FLOOR_W:
+        return "off"
+    return "variable"
+
+
+async def _publish_deferrable_states(
+    ctx: PublishContext, opt_res_latest: pd.DataFrame
+) -> list[str]:
+    """Publish one interpretable command sensor per deferrable load (opt-in).
+
+    Gated by the ``publish_deferrable_load_states`` option (default off, so the
+    zero-config behaviour is unchanged). For each deferrable load this posts a
+    string-state sensor ('on'/'off'/'variable') for the current timestep plus the
+    full optimized plan as a 'schedule' attribute — a generic, glue-agnostic
+    command surface that automations can act on directly.
+    """
+    cols = []
+    if not ctx.optim_conf.get("publish_deferrable_load_states", False):
+        return cols
+    custom_state = ctx.params["passed_data"].get("custom_deferrable_state_id")
+    if not custom_state:
+        return cols
+    number_of_deferrable_loads = ctx.optim_conf["number_of_deferrable_loads"]
+    if len(custom_state) < number_of_deferrable_loads:
+        # A short custom_deferrable_state_id means some loads get no command
+        # sensor. Warn once rather than silently dropping them, so a mis-sized
+        # runtime override is visible instead of failing quietly.
+        ctx.logger.warning(
+            "custom_deferrable_state_id has %d entries but there are %d deferrable "
+            "loads; command sensors will only be published for the first %d load(s).",
+            len(custom_state),
+            number_of_deferrable_loads,
+            len(custom_state),
+        )
+    nominal = ctx.optim_conf.get("nominal_power_of_deferrable_loads", [])
+    for k in range(number_of_deferrable_loads):
+        col_name = f"P_deferrable{k}"
+        if col_name not in opt_res_latest.columns or k >= len(custom_state):
+            continue
+        nominal_power = nominal[k] if k < len(nominal) else 0.0
+        states = opt_res_latest[col_name].apply(
+            lambda power, npow=nominal_power: _deferrable_power_to_state(power, npow)
+        )
+        await ctx.rh.post_data(
+            states,
+            ctx.idx,
+            custom_state[k]["entity_id"],
+            custom_state[k]["device_class"],
+            custom_state[k]["unit_of_measurement"],
+            custom_state[k]["friendly_name"],
+            type_var="categorical",
+            **ctx.common_kwargs,
+        )
+    # The command states are derived (not opt_res columns), so they are
+    # published as a side-effect without being added to the returned column set.
+    return cols
+
+
 async def _publish_thermal_variable(
     rh, opt_res_latest, idx, k, custom_ids, col_prefix, type_var, unit_type, kwargs
 ) -> str | None:
@@ -2438,12 +2675,27 @@ async def publish_data(
     if not save_data_to_file and publish_prefix != "" and not dont_post:
         opt_res = await _publish_from_saved_entities(input_data_dict, logger, params)
         if opt_res is not None:
+            opt_res.attrs["emhass_schema_version"] = EMHASS_SCHEMA_VERSION
             return opt_res
     # Load Optimization Results (if not passed)
     if opt_res_latest is None:
         opt_res_latest = _load_opt_res_latest(input_data_dict, logger, save_data_to_file)
         if opt_res_latest is None:
             return None
+    # A failed/infeasible optimization yields a results frame with only the
+    # optim_status column (see Optimization.perform_optimization); the forecast
+    # and battery columns are absent. Publishing it would crash on the first
+    # lookup (e.g. opt_res_latest["P_Load"]). Surface the failure instead.
+    if "P_Load" not in opt_res_latest.columns:
+        status = "unknown"
+        if "optim_status" in opt_res_latest.columns and not opt_res_latest.empty:
+            status = opt_res_latest["optim_status"].iloc[0]
+        logger.error(
+            "Optimization result is incomplete (status: %s); nothing to publish. "
+            "Run a successful optimization before publishing.",
+            status,
+        )
+        return None
     # Determine Closest Index
     idx_closest = _get_closest_index(input_data_dict["retrieve_hass_conf"], opt_res_latest.index)
     # Create Context
@@ -2463,11 +2715,13 @@ async def publish_data(
     cols_published = []
     cols_published.extend(await _publish_standard_forecasts(ctx, opt_res_latest))
     cols_published.extend(await _publish_deferrable_loads(ctx, opt_res_latest))
+    cols_published.extend(await _publish_deferrable_states(ctx, opt_res_latest))
     cols_published.extend(await _publish_thermal_loads(ctx, opt_res_latest))
     cols_published.extend(await _publish_battery_data(ctx, opt_res_latest))
     cols_published.extend(await _publish_grid_and_costs(ctx, opt_res_latest))
     # Return Summary DataFrame
     opt_res = opt_res_latest[cols_published].loc[[opt_res_latest.index[idx_closest]]]
+    opt_res.attrs["emhass_schema_version"] = EMHASS_SCHEMA_VERSION
     return opt_res
 
 

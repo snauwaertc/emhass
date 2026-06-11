@@ -58,10 +58,10 @@ These are the parameters needed to properly define the optimization problem.
 - `set_use_battery`: Set to True if we should consider an energy storage device such as a Li-Ion battery. Defaults to False.
 - `delta_forecast_daily`: The number of days for forecasted data. Defaults to 1.
 - `number_of_deferrable_loads`: Define the number of deferrable loads to consider. Defaults to 2.
-- `nominal_power_of_deferrable_loads`: The nominal power for each deferrable load in Watts. This is a list with a number of elements consistent with the number of deferrable loads defined before. For example:
+- `nominal_power_of_deferrable_loads`: The nominal power for each deferrable load in Watts. This is a list with a number of elements consistent with the number of deferrable loads defined before. A load can also be given a list of powers in place of a single value to define a **sequence load**: a fixed power profile that the optimizer runs exactly once, contiguously, choosing only the start time (for example a washing-machine programme). Mind the nesting: with `number_of_deferrable_loads: 1`, `[[1000, 2000, 1500]]` is one sequence load with the profile 1000 W, 2000 W, 1500 W, whereas `[1000, 2000, 1500]` with `number_of_deferrable_loads: 3` is three separate single-power loads. A sequence load's runtime is fixed by the length of its sequence, so `operating_hours_of_each_deferrable_load` does not apply to it and that load's value (including 0) is ignored. For example:
 	- 3000
 	- 750
-- `operating_hours_of_each_deferrable_load`: The total number of hours that each deferrable load should operate. For example:
+- `operating_hours_of_each_deferrable_load`: The total number of hours that each deferrable load should operate. Fractional values are accepted (e.g. `4.5`); the optimizer schedules the exact `nominal_power × hours` of energy. For control finer than the optimization timestep you can also pass `operating_timesteps_of_each_deferrable_load`. For example:
 	- 5
 	- 8
 - `start_timesteps_of_each_deferrable_load`: A list of integers defining the **earliest time step index** from which each deferrable load is allowed to start consuming power.
@@ -127,6 +127,7 @@ Example:
 	```
 	Defaults to an empty list (no groups).
 - `weather_forecast_method`: This will define the weather forecast method that will be used. The options are `open-meteo` to use the weather forecast API proposed by [Open-Meteo](https://open-meteo.com/), `solcast` to use the [Solcast](https://solcast.com/) solar forecast service, `solar.forecast` to use the free public [Solar.Forecast](https://forecast.solar/) account and finally the `csv` to load a CSV file. When loading a CSV file this will be directly considered as the PV power forecast in Watts. The default CSV file path that will be used is `/data/data_weather_forecast.csv`. This method is useful to load and use other external forecasting service data in EMHASS. Defaults to `open-meteo` method.
+- `weather_forecast_pv_quantile_bias`: A blend factor that biases the Solcast PV forecast toward its conservative P10 (low) estimate. Type: float. Valid range: `[0, 1]`. Default: `0.0` (pure P50, unchanged behaviour). A value of `1.0` uses the P10 estimate exclusively. Intermediate values blend linearly: `estimate = bias * P10 + (1 - bias) * P50`. Higher values produce more defensive plans — the optimizer is told less solar will be available, so it tends to hold more battery reserve when solar is uncertain. Only effective when `weather_forecast_method` is set to `solcast`; has no effect for other forecast methods.
 - `load_forecast_method`: The load forecast method that will be used. The options are `typical` which uses basic statistics and a year long load power data grouped by the current day-of-the-week of the current month, `naive` also called persistence that assumes that the forecast for a future period will be equal to the observed values in a past period, `mlforecaster` that uses regression models considering auto-regression lags as features and finally the `csv` to load a CSV file. When loading a CSV file this will be directly considered as the PV power forecast in Watts. The default CSV file path that will be used is `/data/data_weather_forecast.csv`. This method is useful to load and use other external forecasting service data in EMHASS. Defaults to `typical`.
 ```{note} 
 
@@ -141,14 +142,14 @@ The following parameters and definitions are only needed if `load_cost_forecast_
 		- period_hp_2:
 			- start: '17:24'
 			- end: '20:24'
-	- `load_peak_hours_cost`: The cost of the electrical energy from the grid during peak hours in €/kWh. Defaults to 0.1907.
-	- `load_offpeak_hours_cost`: The cost of the electrical energy from the grid during non-peak hours in €/kWh. Defaults to 0.1419.
+	- `load_peak_hours_cost`: The cost of the electrical energy from the grid during peak hours in currency/kWh. Defaults to 0.1907.
+	- `load_offpeak_hours_cost`: The cost of the electrical energy from the grid during non-peak hours in currency/kWh. Defaults to 0.1419.
 - `production_price_forecast_method`: Define the method that will be used for PV power production price forecast. This is the price that is paid by the utility for energy injected into the grid. The options are `constant` for a constant fixed value or `csv` to load custom price forecasts from a CSV file. The default CSV file path that will be used is `/data/data_prod_price_forecast.csv`.
 ```{note} 
 
-For all the forecast methods (`weather`, `load_power`, `load_cost` and `production_price`) it is also possible to pass the data from external services using list of values or a dictionary with timestamps. For more information check the dedicated [Passing your own forecast data](https://emhass.readthedocs.io/en/latest/forecasts.html#passing-your-own-forecast-data) section.
+For all the forecast methods (`weather`, `load_power`, `load_cost` and `production_price`) it is also possible to pass the data from external services using a list of values or a dictionary with timestamps. For more information check the dedicated [Passing your own forecast data](https://emhass.readthedocs.io/en/latest/forecasts.html#passing-your-own-forecast-data) section.
 ```
-- `photovoltaic_production_sell_price`: The paid price for energy injected to the grid from excedent PV production in €/kWh. Defaults to 0.065. This parameter is only needed if production_price_forecast_method='constant'.
+- `photovoltaic_production_sell_price`: The paid price for energy injected to the grid from excess PV production in currency/kWh. Defaults to 0.065. This parameter is only needed if production_price_forecast_method='constant'.
 - `set_total_pv_sell`: Set this parameter to true to consider that all the PV power produced is injected to the grid. No direct self-consumption. The default is false, for a system with direct self-consumption.
 - `set_use_adjusted_pv`: Set to True to enable machine learning-based PV forecast adjustment. This uses historical data to train a regression model that corrects PV forecasts based on local conditions. Defaults to False. See the [Forecasts](https://emhass.readthedocs.io/en/latest/forecasts.html#adjusting-pv-forecasts-using-machine-learning) section for more details.
 - `adjusted_pv_regression_model`: The regression model to use for PV forecast adjustment. See `REGRESSION_METHODS` in `machine_learning_regressor.py` for the authoritative list. Currently available: 'LinearRegression', 'RidgeRegression', 'LassoRegression' (default), 'ElasticNet', 'KNeighborsRegressor', 'DecisionTreeRegressor', 'SVR', 'RandomForestRegressor', 'ExtraTreesRegressor', 'GradientBoostingRegressor', 'AdaBoostRegressor', 'MLPRegressor'. Only used when `set_use_adjusted_pv` is True.
@@ -159,11 +160,17 @@ For all the forecast methods (`weather`, `load_power`, `load_cost` and `producti
 - `lp_solver_mip_rel_gap`: MIP (Mixed-Integer Programming) relative gap tolerance. For problems with binary variables (semi-continuous loads, single-constant loads, etc.), the solver will stop when it finds a solution within this percentage of the optimal. A value of 0.05 (5%) means the solver stops when the solution is guaranteed to be within 5% of optimal. Higher values solve faster with minimal quality impact. Recommended: 0.05 for ~2x speedup with negligible quality loss. Defaults to 0 (exact optimal) for backward compatibility.
 - `set_nocharge_from_grid`: Set this to true if you want to forbid charging the battery from the grid. The battery will only be charged from excess PV.
 - `set_nodischarge_to_grid`: Set this to true if you want to forbid discharging battery power to the grid.
+- `set_battery_first_priority`: Set this to true to forbid importing from the grid while the battery is still above its minimum SoC, so stored energy is drained before any grid import. This is mainly useful on a flat (non time-of-use) tariff, where the solver would otherwise be free to interleave grid import with discharge while the battery is still full. Default is false. Note that it is a hard constraint: it can make the optimization infeasible in a timestep where the load minus PV exceeds the battery's maximum discharge power, so only enable it when your battery discharge power can cover your load.
 - `set_battery_dynamic`: Set a power dynamic limiting condition to the battery power. This is an additional constraint on the battery dynamic in power per unit of time, which allows you to set a percentage of the battery's nominal full power as the maximum power allowed for (dis)charge.
 - `battery_dynamic_max`: The maximum positive (for discharge) battery power dynamic. This is the allowed power variation (in percentage) of battery maximum power per unit of time.
 - `battery_dynamic_min`: The maximum negative (for charge) battery power dynamic. This is the allowed power variation (in percentage) of battery maximum power per unit of time.
 - `weight_battery_discharge`: An additional weight (currency/ kWh) applied in the cost function to battery usage for discharging. Defaults to 0.00
 - `weight_battery_charge`: An additional weight (currency/ kWh) applied in the cost function to battery usage for charging. Defaults to 0.00
+- `battery_soc_deficit_threshold`: The state of charge below which a deficit penalty applies, for example 0.40 for 40%. Used together with `battery_soc_deficit_cost`. Defaults to 0.40.
+- `battery_soc_deficit_cost`: A virtual cost (currency/kWh/h) applied for each kWh the battery sits below `battery_soc_deficit_threshold`, per hour. This discourages draining the battery too low. Defaults to 0.00 (disabled).
+- `battery_soc_surplus_threshold`: The state of charge above which a surplus penalty applies, for example 0.90 for 90%. Used together with `battery_soc_surplus_cost`. Defaults to 0.90.
+- `battery_soc_surplus_cost`: A virtual cost (currency/kWh/h) applied for each kWh the battery sits above `battery_soc_surplus_threshold`, per hour. This discourages dwelling near full charge, so the battery fills more gradually into expected solar peaks and spends less time at a high state of charge. It is the mirror of `battery_soc_deficit_cost`. Defaults to 0.00 (disabled).
+- `capacity_cost_per_kw`: A cost in currency per kW applied to the peak grid import power over the optimization horizon, for tariffs that include a capacity or demand charge. Defaults to 0, which disables the feature and leaves the plan unchanged. With a positive value the optimizer adds a single scalar term that prices the highest import power it plans, so it will flatten that peak where doing so is cheaper than the resulting change in energy cost. The peak is charged once because it is a power charge, not energy, so the term is not scaled by the timestep. Set it to the marginal value to you of shaving 1 kW off your peak. Note this is a power-based capacity charge and is separate from `load_peak_hours_cost`, which is a time-of-use energy price.
 
 ## System configuration parameters
 
@@ -194,7 +201,7 @@ Then the additional technical parameters:
 - `modules_per_string`: The number of modules per string. Defaults to 16. This parameter can be a list of items to enable the simulation of mixed orientation systems, for example, one east-facing array (azimuth=90) and one west-facing array (azimuth=270). 
 - `strings_per_inverter`: The number of used strings per inverter. Defaults to 1. This parameter can be a list of items to enable the simulation of mixed orientation systems, for example one east-facing array (azimuth=90) and one west-facing array (azimuth=270).
 - `inverter_is_hybrid`: Set to True to consider that the installation inverter is hybrid for PV and batteries (Default False).
-- `compute_curtailment`: Set to True to compute a special PV curtailment variable (Default False).
+- `compute_curtailment`: Set to True to compute a special PV curtailment variable (Default False). When enabled, curtailment that is cost-equivalent is scheduled as late as possible in the optimization horizon (issue #342).
 - `inverter_stress_cost`: The virtual penalty cost (in currency/kWh) applied if the inverter runs at its maximum nominal power (Recommended: 0.05 - 0.20).
 - `inverter_stress_segments`: The number of linear segments used to approximate the quadratic curve. Higher values are more accurate but increase computation slightly (Recommended: 10).
 

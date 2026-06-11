@@ -52,6 +52,61 @@ curl -i -H "Content-Type:application/json" -X POST -d '{
 }' http://localhost:5000/action/dayahead-optim
 ```
 
+### Multi-day Solcast forecasts for longer MPC horizons
+
+When `weather_forecast_method: solcast` is set and a `prediction_horizon` longer than one day is passed to `naive-mpc-optim`, EMHASS automatically extends the Solcast forecast window to cover the full horizon. The Solcast API request scales its `hours=` parameter accordingly, so no extra configuration is needed — simply pass the desired `prediction_horizon` at runtime:
+
+```bash
+# Run a 36-hour naive-MPC with a native Solcast forecast (no manual delta_forecast_daily required)
+curl -i -H "Content-Type:application/json" -X POST -d '{
+    "prediction_horizon": 72,
+    "solcast_rooftop_id": "<your_system_id>",
+    "solcast_api_key": "<your_secret_api_key>"
+}' http://localhost:5000/action/naive-mpc-optim
+```
+
+Solcast returns a multi-day forecast (several days at 30-minute resolution), so a 36-hour horizon is comfortably within range; on the free hobbyist tier the practical limit is the daily API-call quota rather than the forecast length. If a `prediction_horizon` ever runs past the end of the data Solcast returns, those trailing steps are zero-filled (PV set to zero), so longer horizons are still handled safely.
+
+When the horizon auto-extends, any forecast passed as a runtime list (`weather_forecast_method: list`, `load_power_forecast`, `load_cost_forecast`, or `prod_price_forecast`) must cover the full `prediction_horizon` steps; a shorter list is rejected with an error rather than being silently truncated to one day.
+
+### Conservative PV bias (P10 blend)
+
+Solcast returns three probabilistic estimates for each forecast period: P50 (central / median), P10 (low / conservative, 10th percentile), and P90 (high / optimistic, 90th percentile). By default EMHASS uses only the P50 estimate. The `weather_forecast_pv_quantile_bias` parameter lets you blend P50 and P10 so the optimizer plans against a more cautious solar outlook.
+
+This is useful when the cost of a solar shortfall outweighs the cost of over-reserving the battery. Forecast error is asymmetric: if the sun underperforms the central estimate you may have to buy back the shortfall at the peak retail rate, which usually costs more than the value you give up by holding a little extra reserve. Biasing toward P10 makes the plan robust to that downside.
+
+The blend formula applied per period is:
+
+```
+estimate = bias * pv_estimate10 + (1 - bias) * pv_estimate
+```
+
+where `bias` is `weather_forecast_pv_quantile_bias` (range 0–1, default 0).
+
+| `weather_forecast_pv_quantile_bias` | Effective estimate | Effect on plan |
+|---|---|---|
+| `0.0` (default) | pure P50 | unchanged — matches current behaviour |
+| `0.5` | midpoint of P10 and P50 | moderately conservative solar input |
+| `1.0` | pure P10 | fully conservative — assume worst-case solar |
+
+**Example:** with `pv_estimate = 5.0 kW` and `pv_estimate10 = 2.0 kW`, a bias of `0.5` produces `0.5 × 2.0 + 0.5 × 5.0 = 3.5 kW` as the input to the optimizer. The optimizer then schedules more grid-charge or holds more battery reserve to compensate for the lower expected solar.
+
+To enable, pass the parameter at runtime or add it to your configuration:
+
+```bash
+curl -i -H "Content-Type:application/json" -X POST -d '{
+    "weather_forecast_pv_quantile_bias": 0.5,
+    "solcast_rooftop_id": "<your_system_id>",
+    "solcast_api_key": "<your_secret_api_key>"
+}' http://localhost:5000/action/dayahead-optim
+```
+
+This parameter is Solcast-only; it has no effect when `weather_forecast_method` is set to any other method. If a forecast period does not include a `pv_estimate10` value, EMHASS falls back to the central `pv_estimate` for that period.
+
+```{note}
+When the Solcast cache is enabled (`weather_forecast_cache: true`), the blended forecast is what gets cached. Changing `weather_forecast_pv_quantile_bias` therefore only takes effect on the next cache refresh; to apply a new value immediately, refresh the weather-forecast cache or run with the cache disabled.
+```
+
 ### solar.forecast 
 
 A third method uses the Solar.Forecast service. You will need to set `method=solar.forecast` and use just one parameter `solar_forecast_kwp` (the PV peak installed power in kW) that should be passed at runtime. This will be using the free public Solar.Forecast account with 12 API requests per hour, per IP, and 1h data resolution. As with Solcast, there are paid account services that may result in better forecasts.
@@ -179,6 +234,30 @@ See the [machine learning forecaster](mlforecaster.md) section for more details.
 
 The default method for load cost forecast is defined for a peak and non-peak hours contract type. This is obtained using `method=hp_hc_periods`.
 
+### Per-deferrable-load cost overrides (hybrid heating)
+
+By default, every deferrable load is priced at the shared `load_cost_forecast` (the electricity tariff). For hybrid heating setups - where one deferrable load runs on a different commodity than another (e.g. a heat pump on electricity and a gas boiler on gas) - the shared cost track is wrong: it would dispatch both loads as if they cost the same per kWh.
+
+To handle this, EMHASS supports an optional `cost_forecast_per_deferrable_load` parameter in `optim_conf`. It's a list with one entry per deferrable load:
+
+- `null` (or `None`) for a load → keep the shared `load_cost_forecast` (default).
+- A list of floats (length equal to the forecast horizon, units `Currency/kWh`) → price that load at its own per-timestep rate.
+
+Example: heat pump on `deferrable0` keeps the electricity tariff; gas boiler on `deferrable1` is priced against a flat gas rate of `0.085 €/kWh`:
+
+```json
+{
+  "cost_forecast_per_deferrable_load": [
+    null,
+    [0.085, 0.085, 0.085, ...]
+  ]
+}
+```
+
+The objective adds an adjustment term `(per_load_cost - load_cost) * p_deferrable[k]` for each load with an override. When the override is unset the adjustment is identically zero, so existing setups are unaffected.
+
+Note: this parameter only adjusts the cost in the objective; it does NOT remove a non-electric load from the electric power-balance constraint. For a gas boiler load, configure `nominal_power_of_deferrable_loads[k]` in the gas-input units you want the optimizer to dispatch, and exclude that load from the household electric `load_forecast` so the grid balance reflects only true electric demand.
+
 When using this method you can provide a list of peak-hour periods, so you can add as many peak-hour periods as possible.
 
 As an example for a two peak-hour periods contract you will need to define the following list in the configuration file:
@@ -201,7 +280,7 @@ This example is presented graphically here:
 
 The default method for this forecast is simply a constant value. This can be obtained using `method=constant`.
 
-Then you will need to define the `photovoltaic_production_sell_price` variable to provide the correct price for energy injected to the grid from excedent PV production in €/kWh.
+Then you will need to define the `photovoltaic_production_sell_price` variable to provide the correct price for energy injected to the grid from excess PV production in currency/kWh.
 
 ## Passing your own forecast data
 
