@@ -2353,15 +2353,16 @@ class Optimization:
         where cop_k is resolved via utils.resolve_thermal_battery_cop (Carnot
         for heat pumps, flat for constant-efficiency sources like gas).
 
-        Returns: (predicted_temp_var, heating_demand_arr) for downstream
-        plotting / publishing.
+        Returns: (predicted_temp_var, heating_demand_arr, penalty_term) -
+        the first two for downstream plotting / publishing, the third (or
+        None) for the objective's soft-comfort penalty.
         """
         tank = self._get_shared_thermal_tanks()[tank_idx]
         tank_id = tank.get("id", f"tank{tank_idx}")
         required_len = self.num_timesteps
         load_ids = [int(k) for k in tank.get("load_ids", [])]
         if not load_ids:
-            return None, None
+            return None, None, None
 
         # Tank physics
         volume = tank["volume"]
@@ -2395,11 +2396,20 @@ class Optimization:
                 "or min_temperature_curve"
             )
 
-        # Heating demand resolution: same options as single-source thermal_battery
-        # (draw_off_demand for hot-water tanks; physics or HDD for space heating)
+        # Heating demand resolution: demand models are ADDITIVE (issue #539).
+        # The heat_topology compiler folds a `profile` consumer AND a
+        # `building_demand` consumer into the same storage, so a tank may
+        # serve hot-water draw-off and space heating at once. Standing losses
+        # are counted exactly once: the flat hot-water loss when a draw-off
+        # profile is present (the tank is then a hot-water store), the signed
+        # indoor/outdoor loss otherwise - single-model configs keep their
+        # previous behaviour. The two building models (explicit physics vs
+        # HDD) stay mutually exclusive: a building is modelled one way.
+        heating_demand = np.zeros(required_len)
         hot_water = self._resolve_draw_off_demand(tank, base_loss, required_len)
         if hot_water is not None:
-            heating_demand, thermal_losses = hot_water
+            draw_off_demand, thermal_losses = hot_water
+            heating_demand = heating_demand + np.asarray(draw_off_demand)[:required_len]
         else:
             thermal_losses = np.array(
                 utils.calculate_thermal_loss_signed(
@@ -2408,36 +2418,33 @@ class Optimization:
                     base_loss=base_loss,
                 )[:required_len]
             )
-            if all(
-                key in tank
-                for key in ["u_value", "envelope_area", "ventilation_rate", "heated_volume"]
-            ):
-                indoor_target_temp = tank.get(
-                    "indoor_target_temperature",
-                    min_temperatures_list[0] if min_temperatures_list else 20.0,
-                )
-                demand = utils.calculate_heating_demand_physics(
-                    u_value=tank["u_value"],
-                    envelope_area=tank["envelope_area"],
-                    ventilation_rate=tank["ventilation_rate"],
-                    heated_volume=tank["heated_volume"],
-                    indoor_target_temperature=indoor_target_temp,
-                    outdoor_temperature_forecast=outdoor_temp_arr.tolist(),
-                    optimization_time_step=int(self.freq.total_seconds() / 60),
-                )
-            elif "specific_heating_demand" in tank and "area" in tank:
-                demand = utils.calculate_heating_demand(
-                    specific_heating_demand=tank["specific_heating_demand"],
-                    floor_area=tank["area"],
-                    outdoor_temperature_forecast=outdoor_temp_arr.tolist(),
-                    base_temperature=tank.get("base_temperature", 18.0),
-                    annual_reference_hdd=tank.get("annual_reference_hdd", 3000.0),
-                    optimization_time_step=int(self.freq.total_seconds() / 60),
-                )
-            else:
-                # No heating demand model - idle tank with losses only
-                demand = [0.0] * required_len
-            heating_demand = np.array(demand[:required_len])
+        if all(
+            key in tank for key in ["u_value", "envelope_area", "ventilation_rate", "heated_volume"]
+        ):
+            indoor_target_temp = tank.get(
+                "indoor_target_temperature",
+                min_temperatures_list[0] if min_temperatures_list else 20.0,
+            )
+            demand = utils.calculate_heating_demand_physics(
+                u_value=tank["u_value"],
+                envelope_area=tank["envelope_area"],
+                ventilation_rate=tank["ventilation_rate"],
+                heated_volume=tank["heated_volume"],
+                indoor_target_temperature=indoor_target_temp,
+                outdoor_temperature_forecast=outdoor_temp_arr.tolist(),
+                optimization_time_step=int(self.freq.total_seconds() / 60),
+            )
+            heating_demand = heating_demand + np.array(demand[:required_len])
+        elif "specific_heating_demand" in tank and "area" in tank:
+            demand = utils.calculate_heating_demand(
+                specific_heating_demand=tank["specific_heating_demand"],
+                floor_area=tank["area"],
+                outdoor_temperature_forecast=outdoor_temp_arr.tolist(),
+                base_temperature=tank.get("base_temperature", 18.0),
+                annual_reference_hdd=tank.get("annual_reference_hdd", 3000.0),
+                optimization_time_step=int(self.freq.total_seconds() / 60),
+            )
+            heating_demand = heating_demand + np.array(demand[:required_len])
 
         # Apply surface solar gain if configured at the tank level
         solar_gain = utils.calculate_surface_solar_gain(
@@ -2455,6 +2462,12 @@ class Optimization:
         # Optional per-source temperature ceiling (e.g. a heat pump capped at its
         # supply temperature). None = no cap (e.g. an electric booster).
         source_caps: list[float | None] = []
+        # Optional per-source soft threshold: the source is switched off while
+        # the tank sits beyond it (used with the tank's desired_temperatures).
+        # A source without its own value inherits the tank-level
+        # overshoot_temperature, matching the compiler's storage-level field.
+        source_overshoots: list[float | None] = []
+        tank_overshoot = tank.get("overshoot_temperature")
         for k in load_ids:
             src_cfg = self._get_load_source_config(k)
             cops = utils.resolve_thermal_battery_cop(
@@ -2463,6 +2476,7 @@ class Optimization:
             cop_arrays.append(np.asarray(cops))
             # scalar, per-step list, or None (uncapped)
             source_caps.append(src_cfg.get("max_supply_temperature"))
+            source_overshoots.append(src_cfg.get("overshoot_temperature", tank_overshoot))
 
         # Build CVXPY tank temperature variable
         predicted_temp = cp.Variable(required_len, name=f"temp_shared_{tank_id}")
@@ -2540,7 +2554,78 @@ class Optimization:
             constraints.append(predicted_temp[1:] - cap_arr[1:] <= big_m_temp * (1 - allow_k[:-1]))
             constraints.append(p_k <= nominal_k * allow_k)
 
-        return predicted_temp, heating_demand
+        # Soft comfort constraints (issue #539): the tank's desired_temperatures
+        # set a comfort target whose shortfall is penalized in the objective
+        # (same pattern as thermal_config / thermal_battery loads), and each
+        # source with an overshoot_temperature is switched off while the tank
+        # sits beyond its threshold - e.g. the heat pump stops at 55 C while
+        # the electric element keeps going to 75 C. Unlike the hard
+        # max_supply_temperature gate above (a physical limit), this is a
+        # preference: the band stays soft, which keeps the problem feasible.
+        penalty_term = None
+        desired_raw = tank.get("desired_temperatures")
+        if isinstance(desired_raw, int | float):
+            desired_temps_list = [float(desired_raw)] * required_len
+        else:
+            desired_temps_list = list(desired_raw or [])
+        if desired_temps_list:
+            sense = utils.normalize_heat_cool_mode(
+                tank.get("sense") or "heat",
+                field_name="sense",
+                context=f"Shared tank {tank_id}",
+            )
+            sense_coeff = 1 if sense == "heat" else -1
+            finite_min_temps = [v for v in min_temperatures_list if v is not None]
+
+            for k, overshoot in zip(load_ids, source_overshoots):
+                if overshoot is None:
+                    continue
+                overshoot = float(overshoot)
+                # The indicator is two-sided, so M must dominate the distance
+                # from the threshold to BOTH feasible temperature extremes.
+                big_m_os = SHARED_TANK_CAP_BIG_M_TEMP
+                if tank_temp_ub is not None:
+                    big_m_os = max(big_m_os, tank_temp_ub - overshoot)
+                if finite_min_temps:
+                    big_m_os = max(big_m_os, overshoot - min(finite_min_temps))
+                is_overshoot = cp.Variable(
+                    required_len, boolean=True, name=f"is_overshoot_shared_{tank_id}_{k}"
+                )
+                if sense == "heat":
+                    constraints.append(predicted_temp - overshoot - big_m_os * is_overshoot <= 0)
+                    constraints.append(
+                        predicted_temp - overshoot + big_m_os * (1 - is_overshoot) >= 0
+                    )
+                else:
+                    constraints.append(predicted_temp - overshoot + big_m_os * is_overshoot >= 0)
+                    constraints.append(
+                        predicted_temp - overshoot - big_m_os * (1 - is_overshoot) <= 0
+                    )
+                # Suppress THIS source while the tank is beyond its threshold -
+                # same gating split as the thermal_battery soft constraints.
+                if self.optim_conf["treat_deferrable_load_as_semi_cont"][k]:
+                    constraints.append(is_overshoot[1:] + self.vars["p_def_bin2"][k][:-1] <= 1)
+                else:
+                    nominal_k = self.optim_conf["nominal_power_of_deferrable_loads"][k]
+                    if isinstance(nominal_k, list | np.ndarray):
+                        nominal_k = max(nominal_k)
+                    constraints.append(
+                        self.vars["p_deferrable"][k] <= nominal_k * (1 - is_overshoot)
+                    )
+
+            # Comfort-shortfall penalty toward the desired band: only deviation
+            # below desired (sense=heat) / above desired (sense=cool) is priced.
+            penalty_factor = tank.get("penalty_factor", 10)
+            if valid_indices := [
+                i
+                for i, val in enumerate(desired_temps_list)
+                if val is not None and 0 < i < required_len
+            ]:
+                des_temps = np.array([desired_temps_list[i] for i in valid_indices])
+                deviation = (predicted_temp[valid_indices] - des_temps) * sense_coeff
+                penalty_term = cp.sum(-cp.pos(-deviation * penalty_factor))
+
+        return predicted_temp, heating_demand, penalty_term
 
     def _add_deferrable_load_constraints(
         self,
@@ -2938,9 +3023,11 @@ class Optimization:
         # shared tank is fed by N >= 1 deferrable loads; their per-load
         # thermal_battery dynamics were skipped above.
         for tank_idx, tank in enumerate(self._get_shared_thermal_tanks()):
-            shared_pred_temp, shared_demand = self._add_shared_thermal_tank_constraints(
-                constraints, tank_idx, data_opt, p_load
+            shared_pred_temp, shared_demand, shared_penalty = (
+                self._add_shared_thermal_tank_constraints(constraints, tank_idx, data_opt, p_load)
             )
+            if shared_penalty is not None:
+                penalty_terms_total += shared_penalty
             if shared_pred_temp is not None:
                 # Surface the tank state on the first member load so downstream
                 # publishing has a temperature column to report. Subsequent
