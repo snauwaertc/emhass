@@ -115,6 +115,10 @@ Here is the list of the other additional dictionary keys that can be passed at r
 
 - `current_period_peak` the peak grid import (in Watts) already incurred during the current billing period. Only used by `naive-mpc-optim`, and only when a capacity/demand charge (`capacity_cost_per_kw`) is configured. See the dedicated section below.
 
+- `shared_thermal_tanks` a list of shared thermal storage tank objects (multi-source storage), the manual flat alternative to `heat_topology`. Each tank carries `id`, `load_ids`, `volume`, `start_temperature`, `min_temperatures` / `max_temperatures`, and demand fields - the same schema the `heat_topology` compiler emits (see the storage schema in [heat_topology.md](heat_topology.md)). Useful when you want shared tanks alongside arbitrary other deferrable loads, with the tank state refreshed per run. When `heat_topology` is also set, the compiled topology replaces this list: pass `heat_topology` itself at runtime instead.
+
+- `shared_tank_start_temperatures` a per-tank start-temperature override keyed by tank id, e.g. `{"dhw": 48.5}`. It is applied after the `heat_topology` compile, so it patches manual and compiled tanks alike - the per-run analog of `soc_init` / `heater_start_temperatures` for MPC loops feeding a live tank temperature sensor, without resending the whole tank structure. Unknown tank ids and non-numeric values are ignored with a warning.
+
 ### Requiring an intermediate battery SOC target (naive-mpc-optim)
 
 By default the battery SOC is only pinned at the start (`soc_init`) and end (`soc_final`) of the horizon, leaving the optimizer free to choose the trajectory in between. Sometimes you want to *guarantee* the battery reaches a given charge level **partway through** the horizon — for example, "make sure the battery is full by the time the cheap window ends, even though it's fine to discharge it afterwards". This is the request in [issue #553](https://github.com/davidusb-geek/emhass/issues/553).
