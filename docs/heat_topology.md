@@ -344,6 +344,16 @@ the flag is you asserting that the flat per-load config describes real loads.
 Manually declared `shared_thermal_tanks` / `deferrable_load_groups` entries are kept;
 the compiled ones are appended after them.
 
+```{warning}
+The appended topology loads are numbered relative to your configured load count:
+adding or removing a manual deferrable load later **renumbers** the topology loads
+(`sensor.p_deferrable2` silently changes meaning). Keep the manual load count stable
+once a topology is in use, or remap the published entities via
+`custom_deferrable_forecast_id`. If your load set changes often, a manual
+`shared_thermal_tanks` configuration (which you index yourself) may be the better
+fit.
+```
+
 ## Validation
 
 The compiler fails fast with a `ValueError` naming the offending field when:
