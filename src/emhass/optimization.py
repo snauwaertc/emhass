@@ -4081,6 +4081,10 @@ class Optimization:
         # in the decrement branch below; consumed by the param_load_active loop.
         cots_satisfied_loads = set()
 
+        # Shared-tank members are temperature-driven; used below to exempt them
+        # from the operating-timestep deactivation in the param_load_active loop.
+        shared_tank_membership = self._load_shared_tank_membership()
+
         # Update Energy Constraint Parameters for Deferrable Loads
         # These control the Big-M relaxation of energy/timestep constraints
         for k in range(min(num_deferrable_loads, len(self.param_target_energy))):
