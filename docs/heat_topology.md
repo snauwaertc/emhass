@@ -64,6 +64,7 @@ Each source is one heat producer. Common fields:
 | `electric` | bool | by type | Overrides bus membership. Defaults: heat pump / electric / constant_efficiency -> `true`; gas / oil / district -> `false`. |
 | `cost_track` | string | none | Key into `cost_tracks`. Sets this load's per-timestep cost (gas tariff vs electricity tariff). |
 | `max_supply_temperature` | number or list | none | Hard ceiling (degC) on the storage temperature this source can heat into. Scalar, or a per-step list for weather-dependent condenser limits (a short list is forward-filled with its last value). Omit to leave the source uncapped. |
+| `overshoot_temperature` | number | storage value | Soft threshold (degC): with the storage's `desired_temperatures` set, this source stops while the storage sits above it. Overrides the storage-level `overshoot_temperature`; omit to inherit it. |
 
 **Heat-pump sources** (`heatpump` / `heat_pump`) additionally need a supply temperature,
 which drives the Carnot COP:
@@ -130,15 +131,24 @@ pool or any low-priority store):
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `desired_temperature` / `desired_temperatures` | number or list | Comfort target (scalar is broadcast across the horizon). |
-| `overshoot_temperature` | number | Allowed overshoot before penalty. |
-| `penalty_factor` | number | Weight of the comfort penalty in the objective. |
+| `desired_temperature` / `desired_temperatures` | number or list | Comfort target (scalar is broadcast across the horizon). Shortfall below it (for `heat`) is penalised in the objective. |
+| `overshoot_temperature` | number | Default soft threshold for the feeding sources: with a comfort target set, a source stops while the storage sits above this temperature. A source can override it with its own `overshoot_temperature`. |
+| `penalty_factor` | number | Weight of the comfort penalty in the objective (default `10`). |
 | `comfort_sense` | string | `"heat"` or `"cool"`. |
+
+The per-source override is what makes a two-stage setup work as a *preference*: set
+`desired_temperatures: 60` on the tank, `overshoot_temperature: 55` on the heat pump
+and `75` on the electric element, and the element lifts the band above 55 degC only
+when the comfort penalty justifies it - while the band itself stays soft, so the
+problem cannot go infeasible over comfort. For a *physical* limit the source cannot
+exceed at any price, use `max_supply_temperature` instead; the two compose.
 
 ### `consumers`
 
 Each consumer puts demand on one storage. `target` must be a storage `id`. `type`
-selects the demand model:
+selects the demand model. Demand models are **additive**: a storage can carry a
+draw-off profile and a building demand at the same time (a combi-tank serving hot
+water and space heating), and the solver serves their sum.
 
 - `type: "profile"` - explicit draw-off: `profile` is a per-timestep demand list
   (kWh per step). Multiple `profile` consumers on the same storage are summed.
@@ -149,6 +159,9 @@ selects the demand model:
   Only **one** `building_demand` is allowed per storage.
 - `type: "pool_comfort"` - surface solar gain: `solar_absorption_area`,
   `solar_absorption_factor`.
+
+Standing losses are counted once: a storage with a draw-off profile uses the flat
+hot-water standing loss; a storage without one uses the signed indoor/outdoor loss.
 
 See [thermal_battery.md](thermal_battery.md) for the meaning and calibration of the
 building-physics and solar-gain fields.
