@@ -327,11 +327,13 @@ have real non-thermal deferrable loads (washing machine, EV charger, ...) config
 the flat per-load arrays, set the topology-level flag:
 
 ```json
-"heat_topology": {
-  "extend_deferrable_loads": true,
-  "sources": [ ... ],
-  "storage": [ ... ],
-  "flows": [ ... ]
+{
+  "heat_topology": {
+    "extend_deferrable_loads": true,
+    "sources": ["..."],
+    "storage": ["..."],
+    "flows": ["..."]
+  }
 }
 ```
 
