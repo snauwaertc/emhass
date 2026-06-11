@@ -63,6 +63,7 @@ Each source is one heat producer. Common fields:
 | `operating_hours` | int | `4` | Target run hours over the horizon. |
 | `electric` | bool | by type | Overrides bus membership. Defaults: heat pump / electric / constant_efficiency -> `true`; gas / oil / district -> `false`. |
 | `cost_track` | string | none | Key into `cost_tracks`. Sets this load's per-timestep cost (gas tariff vs electricity tariff). |
+| `max_supply_temperature` | number or list | none | Hard ceiling (degC) on the storage temperature this source can heat into. Scalar, or a per-step list for weather-dependent condenser limits (a short list is forward-filled with its last value). Omit to leave the source uncapped. |
 
 **Heat-pump sources** (`heatpump` / `heat_pump`) additionally need a supply temperature,
 which drives the Carnot COP:
@@ -83,6 +84,29 @@ A heat-pump source must provide one of `heating_curve` or `supply_temperature`.
 Because gas/oil/district default to `electric: false`, those loads contribute only to
 their thermal target, **not** to the electric power balance - which is exactly what
 makes a gas boiler price against gas while the heat pump prices against electricity.
+
+**Per-source temperature ceiling** (`max_supply_temperature`). When two sources feed
+the same storage but reach different maximum temperatures - the classic case is a DHW
+tank fed by a heat pump (condenser limit ~53 degC) plus an electric booster (to
+~65 degC) - the optimizer would otherwise assign everything to the cheaper source,
+including the band above its supply temperature, which it physically cannot deliver.
+Setting `max_supply_temperature` on the capped source makes that limit hard: the
+source may only inject heat while the tank is at or below its ceiling, so the
+uncapped source is scheduled exactly for the band above it.
+
+```json
+"sources": [
+  { "id": "hp", "type": "heatpump", "nominal_power": 3500,
+    "supply_temperature": 55, "max_supply_temperature": 53 },
+  { "id": "booster", "type": "electric", "nominal_power": 3000,
+    "efficiency": 1.0 }
+]
+```
+
+This is a physical limit, not a preference: it stays enforced even in the relaxed-LP
+fallback. For a *soft* preference (run the booster only above some comfort threshold,
+at a penalty), use the storage-level `desired_temperatures` / `overshoot_temperature`
+fields instead - the two mechanisms compose.
 
 ### `storage`
 
@@ -295,7 +319,12 @@ The compiler fails fast with a `ValueError` naming the offending field when:
 - a `consumer.type` is not one of `profile`, `building_demand`, `pool_comfort`;
 - a `min_temperature_curve` is missing `slope` / `offset`;
 - a `comfort_sense` is not `heat` or `cool`;
-- an `actuator_groups[..].flows` entry references a flow that does not exist.
+- an `actuator_groups[..].flows` entry references a flow that does not exist;
+- a `max_supply_temperature` is non-positive or an empty list;
+- a storage's static `min_temperatures[t]` exceeds the highest
+  `max_supply_temperature` of every source feeding it (the band would be
+  physically unreachable - raise a ceiling, lower the minimum, or add an
+  uncapped source).
 
 If `heat_topology` is set to something that is not a non-empty object, it is ignored
 and a warning is logged.
