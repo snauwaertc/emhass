@@ -59,6 +59,8 @@ EXPECTED_KEYS = {
     "weather_forecast_cache_only",
     "def_current_state",
     "def_load_config",
+    "shared_thermal_tanks",
+    "shared_tank_start_temperatures",
 }
 
 
