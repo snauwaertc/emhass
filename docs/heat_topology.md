@@ -315,7 +315,46 @@ these ways:
   cost tracks). See [passing_data.md](passing_data.md).
 
 When `heat_topology` is set, the compiler fills in `number_of_deferrable_loads` and the
-per-load arrays for you - do not set those by hand at the same time.
+per-load arrays for you. By default it **replaces** the whole deferrable-load set - do
+not set the per-load arrays by hand at the same time unless you also set
+`extend_deferrable_loads` (below).
+
+## Combining with other deferrable loads
+
+By default the compiler cannot tell your configured deferrable loads apart from the
+shipped defaults, so it replaces the entire load set with the topology's flows. If you
+have real non-thermal deferrable loads (washing machine, EV charger, ...) configured in
+the flat per-load arrays, set the topology-level flag:
+
+```json
+{
+  "heat_topology": {
+    "extend_deferrable_loads": true,
+    "sources": ["..."],
+    "storage": ["..."],
+    "flows": ["..."]
+  }
+}
+```
+
+With the flag set, your configured loads keep their indices `0..N-1` and the compiled
+topology loads are appended at `N..N+M-1`. Shared-tank `load_ids` and actuator-group
+references are shifted accordingly, and per-load arrays are padded to your configured
+load count (with the usual defaults) before the topology values are appended. Setting
+the flag is you asserting that the flat per-load config describes real loads.
+
+Manually declared `shared_thermal_tanks` / `deferrable_load_groups` entries are kept;
+the compiled ones are appended after them.
+
+```{warning}
+The appended topology loads are numbered relative to your configured load count:
+adding or removing a manual deferrable load later **renumbers** the topology loads
+(`sensor.p_deferrable2` silently changes meaning). Keep the manual load count stable
+once a topology is in use, or remap the published entities via
+`custom_deferrable_forecast_id`. If your load set changes often, a manual
+`shared_thermal_tanks` configuration (which you index yourself) may be the better
+fit.
+```
 
 ## Validation
 
