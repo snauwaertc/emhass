@@ -7,11 +7,9 @@ EMHASS compiles the graph down to the primitives the optimizer already understan
 `cost_forecast_per_deferrable_load`, ...) so you do not have to keep a dozen
 parallel lists index-aligned by hand.
 
-It was added to answer the recurring "hybrid heating source" request
-([issue #539](https://github.com/davidusb-geek/emhass/issues/539)): a heat pump and
-a gas boiler that can both feed the same buffer and the same domestic-hot-water (DHW)
-tank, each priced against its own tariff, with the constraint that one source can
-only serve one target at a time.
+A typical system it describes: a heat pump and a gas boiler that can both feed the
+same buffer and the same domestic-hot-water (DHW) tank, each priced against its own
+tariff, with the constraint that one source can only serve one target at a time.
 
 ```{note}
 `heat_topology` is an advanced parameter. If you have a single heat source and a
