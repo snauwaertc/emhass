@@ -1587,6 +1587,43 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["is_electric_load"], [True] * (original_num + 2))
         self.assertIn("thermal_source", out["def_load_config"][original_num])
 
+    async def test_treat_runtimeparams_heat_topology_extend_propagates_transfers(self):
+        """extend_deferrable_loads must also carry tank->tank transfers through;
+        they key on storage ids, so they need no load-index shift (the source
+        flows feeding the buffer still shift past the user's loads)."""
+        params = await TestUtils.get_test_params()
+        params_json = orjson.dumps(params).decode("utf-8")
+        retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params_json, logger)
+        original_num = optim_conf["number_of_deferrable_loads"]
+        topo = {
+            "extend_deferrable_loads": True,
+            "sources": [
+                {"id": "hp", "type": "heatpump", "supply_temperature": 45,
+                 "carnot_efficiency": 0.45, "nominal_power": 3000}
+            ],
+            "storage": [
+                {"id": "buffer", "volume": 0.1, "min_temperature": [25] * 48, "max_temperature": [45] * 48},
+                {"id": "house", "thermal_mass": 18, "loss_coefficient": 0.5,
+                 "min_temperature": [19.5] * 48, "max_temperature": [21.5] * 48},
+            ],
+            "flows": [
+                {"from": "hp", "to": "buffer"},
+                {"from": "buffer", "to": "house", "transfer_coefficient": 0.7, "max_transfer_power": 12000},
+            ],
+        }
+        _, _, out, _ = await treat_runtimeparams(
+            orjson.dumps({"heat_topology": topo}).decode("utf-8"),
+            params_json, retrieve_hass_conf, optim_conf, plant_conf,
+            "dayahead-optim", logger, emhass_conf,
+        )
+        self.assertEqual(len(out["tank_transfers"]), 1)
+        self.assertEqual(out["tank_transfers"][0]["from"], "buffer")
+        self.assertEqual(out["tank_transfers"][0]["to"], "house")
+        buffer_tank = next(t for t in out["shared_thermal_tanks"] if t["id"] == "buffer")
+        self.assertEqual(buffer_tank["load_ids"], [original_num])  # source load shifted
+        house_tank = next(t for t in out["shared_thermal_tanks"] if t["id"] == "house")
+        self.assertEqual(house_tank["load_ids"], [])  # transfer-only, no source
+
     async def test_treat_runtimeparams_heat_topology_replace_stays_default(self):
         """Without the flag the compiler keeps today's replace behaviour:
         the topology defines the whole load set, indices start at 0."""
