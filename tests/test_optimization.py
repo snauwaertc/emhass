@@ -3468,6 +3468,214 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         total = res["P_deferrable0"].sum() + res["P_deferrable1"].sum()
         self.assertGreater(total, 0, "Expected some dispatch to satisfy draw_off demand")
 
+    def _setup_single_hp(self, supply_temperature=40.0, nominal=3000):
+        """optim_conf for one heat-pump (Carnot) deferrable load feeding a tank."""
+        self.optim_conf["number_of_deferrable_loads"] = 1
+        self.optim_conf["nominal_power_of_deferrable_loads"] = [nominal]
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [0]
+        self.optim_conf["operating_hours_of_each_deferrable_load"] = [0]
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False]
+        self.optim_conf["set_deferrable_load_single_constant"] = [False]
+        self.optim_conf["set_deferrable_startup_penalty"] = [0.0]
+        self.optim_conf["set_deferrable_max_startups"] = [0]
+        self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0]
+        self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0]
+        self.optim_conf["def_load_config"] = [
+            {"thermal_source": {"supply_temperature": supply_temperature, "carnot_efficiency": 0.45}},
+        ]
+
+    def test_shared_tank_building_zone_state_dependent_loss(self):
+        """Unified thermal tank (issue #539): a storage with thermal_mass +
+        loss_coefficient behaves as a building thermal mass - the temperature is a
+        state losing UA*(T-outdoor), free to drift inside the comfort band, so a
+        cheap-then-expensive price profile pre-heats the mass then coasts."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [2.0] * 48
+        self._setup_single_hp(supply_temperature=40.0)
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "house",
+                "load_ids": [0],
+                "thermal_mass": 8.0,
+                "loss_coefficient": 0.4,
+                "start_temperature": 20.5,
+                "min_temperatures": [19.5] * 48,
+                "max_temperatures": [21.5] * 48,
+                "desired_temperatures": [20.0] * 48,
+                "penalty_factor": 1,
+            }
+        ]
+        opt = self.create_optimization()
+        cheap_then_dear = np.array([0.05] * 24 + [0.40] * 24)
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            cheap_then_dear,
+            np.full(48, 0.02),
+        )
+        tcol = [c for c in res.columns if "temp_shared_house" in c or "temp_heater" in c][0]
+        temps = res[tcol].to_numpy()
+        self.assertGreaterEqual(temps.min(), 19.5 - 0.25)
+        self.assertLessEqual(temps.max(), 21.5 + 0.25)
+        # State-dependent loss + price spread => pre-heat then coast within the band.
+        self.assertGreater(
+            temps.max() - temps.min(),
+            0.5,
+            "Expected the zone temperature to drift inside its comfort band",
+        )
+        self.assertGreater(res["P_deferrable0"].sum(), 0)
+
+    def test_shared_tank_thermal_mass_matches_equivalent_volume(self):
+        """thermal_mass (kWh/K) and an equivalent water volume give identical
+        dynamics: C = density*heat_capacity*V/3600, so V=0.2 m3 == 0.2326 kWh/K."""
+
+        def run(tank_extra):
+            self.df_input_data_dayahead = self.prepare_forecast_data()
+            self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
+            self._setup_single_hp(supply_temperature=55.0, nominal=3500)
+            tank = {
+                "id": "t",
+                "load_ids": [0],
+                "start_temperature": 50.0,
+                "thermal_loss": 0.0,
+                "min_temperatures": [45.0] * 48,
+                "max_temperatures": [60.0] * 48,
+                "draw_off_demand": [0.0] * 13 + [1.0] + [0.0] * 34,
+            }
+            tank.update(tank_extra)
+            self.optim_conf["shared_thermal_tanks"] = [tank]
+            opt = self.create_optimization()
+            res = opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                self.df_input_data_dayahead[opt.var_load_cost].values,
+                self.df_input_data_dayahead[opt.var_prod_price].values,
+            )
+            tcol = [c for c in res.columns if "temp_shared_t" in c or "temp_heater" in c][0]
+            return res[tcol].to_numpy()
+
+        by_volume = run({"volume": 0.2, "density": 1000, "heat_capacity": 4.186})
+        by_mass = run({"thermal_mass": 1000 * 4.186 * 0.2 / 3600})
+        np.testing.assert_allclose(by_volume, by_mass, atol=0.05)
+
+    def test_shared_tank_thermal_inertia_solves(self):
+        """A zone tank with thermal_inertia (heat-input lag + dead zone) stays
+        feasible and respects its comfort band."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [5.0] * 48
+        self._setup_single_hp(supply_temperature=40.0)
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "house",
+                "load_ids": [0],
+                "thermal_mass": 8.0,
+                "loss_coefficient": 0.3,
+                "thermal_inertia": 1.0,  # ~2 steps of lag at 30-min resolution
+                "start_temperature": 20.5,
+                "min_temperatures": [19.5] * 48,
+                "max_temperatures": [21.5] * 48,
+            }
+        ]
+        opt = self.create_optimization()
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        self.assertIn(opt.optim_status, ("Optimal", "Optimal (Relaxed)"))
+        tcol = [c for c in res.columns if "temp_shared_house" in c or "temp_heater" in c][0]
+        temps = res[tcol].to_numpy()
+        self.assertGreaterEqual(temps.min(), 19.5 - 0.3)
+        self.assertLessEqual(temps.max(), 21.5 + 0.3)
+
+    def test_shared_tank_zone_window_solar_reduces_heating(self):
+        """A zone tank with window_area gains solar through glazing (window_area *
+        SHGC * GHI), so on a sunny day it needs less heating from its source than
+        the same windowless tank (issue #539 window solar)."""
+
+        def heating_energy(window_area):
+            self.df_input_data_dayahead = self.prepare_forecast_data()
+            self.df_input_data_dayahead["outdoor_temperature_forecast"] = [8.0] * 48
+            ghi = np.zeros(48)
+            ghi[18:30] = 500.0  # strong midday sun
+            self.df_input_data_dayahead["ghi"] = ghi
+            self._setup_single_hp(supply_temperature=40.0)
+            tank = {
+                "id": "house", "load_ids": [0], "thermal_mass": 8.0, "loss_coefficient": 0.4,
+                "start_temperature": 20.0, "min_temperatures": [19.5] * 48,
+                "max_temperatures": [24.0] * 48, "desired_temperatures": [20.5] * 48, "penalty_factor": 5,
+            }
+            if window_area:
+                tank["window_area"] = window_area
+                tank["shgc"] = 0.6
+            self.optim_conf["shared_thermal_tanks"] = [tank]
+            opt = self.create_optimization()
+            res = opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                np.full(48, 0.40),  # heating is costly -> the optimiser leans on free solar
+                np.full(48, 0.02),
+            )
+            return res["P_deferrable0"].sum()
+
+        self.assertLess(
+            heating_energy(25), heating_energy(0),
+            "window solar should reduce the heating the zone needs on a sunny day",
+        )
+
+    def test_tank_to_tank_transfer_buffer_feeds_room(self):
+        """tank->tank transfer (issue #539): HP+boiler heat a BUFFER, the buffer
+        feeds a transfer-only HOUSE zone through an emitter. The room has no direct
+        source - it must be held in band *via* the buffer, and the transfer can
+        only move heat down the gradient (buffer >= room every step)."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [2.0] * 48
+        self.optim_conf["number_of_deferrable_loads"] = 2
+        self.optim_conf["nominal_power_of_deferrable_loads"] = [3000, 24000]
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [0, 0]
+        self.optim_conf["operating_hours_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False, False]
+        self.optim_conf["set_deferrable_load_single_constant"] = [False, False]
+        self.optim_conf["set_deferrable_startup_penalty"] = [0.0, 0.0]
+        self.optim_conf["set_deferrable_max_startups"] = [0, 0]
+        self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["def_load_config"] = [
+            {"thermal_source": {"supply_temperature": 45.0, "carnot_efficiency": 0.45}},
+            {"thermal_source": {"efficiency": 0.95}},
+        ]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {"id": "buffer", "load_ids": [0, 1], "volume": 0.1, "start_temperature": 40.0,
+             "thermal_loss": 0.05, "min_temperatures": [25.0] * 48, "max_temperatures": [45.0] * 48},
+            {"id": "house", "load_ids": [], "thermal_mass": 18.0, "loss_coefficient": 0.5,
+             "start_temperature": 20.5, "min_temperatures": [19.5] * 48,
+             "max_temperatures": [21.5] * 48, "desired_temperatures": [20.5] * 48, "penalty_factor": 30},
+        ]
+        self.optim_conf["tank_transfers"] = [
+            {"from": "buffer", "to": "house", "transfer_coefficient": 0.7, "max_transfer_power": 12000}
+        ]
+        opt = self.create_optimization()
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        tcols = [c for c in res.columns if "predicted_temp_heater" in c]
+        # house = the coolest tank trace; buffer = the warmest
+        house = res[min(tcols, key=lambda c: res[c].mean())].to_numpy()
+        buffer = res[max(tcols, key=lambda c: res[c].mean())].to_numpy()
+        self.assertGreaterEqual(house.min(), 19.5 - 0.3, "room must be held in band via the buffer")
+        self.assertLessEqual(house.max(), 21.5 + 0.3)
+        self.assertGreater(buffer.mean(), house.mean() + 5, "buffer should run much hotter than the room")
+        self.assertTrue((buffer >= house - 0.1).all(), "transfer must respect the temperature gradient")
+
     def _run_hp_booster_tank(
         self,
         hp_cap,
