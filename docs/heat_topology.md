@@ -115,7 +115,7 @@ same physics as a standalone [thermal_battery](thermal_battery.md):
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `id` | string | required | Unique across storage. |
-| `volume` | number | required | Litres. |
+| `volume` | number | required* | Litres. *Required unless `thermal_mass` is given (a building zone). |
 | `density` | number | `1000` | kg/m3 (use ~`997` for hot water). |
 | `heat_capacity` | number | `4.186` | kJ/(kg.K). |
 | `start_temperature` | number | `20.0` | Initial tank temperature (degC). |
@@ -140,6 +140,46 @@ and `75` on the electric element, and the element lifts the band above 55 degC o
 when the comfort penalty justifies it - while the band itself stays soft, so the
 problem cannot go infeasible over comfort. For a *physical* limit the source cannot
 exceed at any price, use `max_supply_temperature` instead; the two compose.
+
+#### Building-zone tanks (unified thermal model)
+
+A storage can also model a **building zone** (a house, a room) as a thermal mass
+whose temperature is a state variable free to drift inside its comfort band - the
+load-shifting lever the standalone [thermal model](thermal_model.md) provides, now
+available *inside* the topology so a zone can be fed by the same hybrid sources
+(heat pump + boiler, per-source COP) as the tanks. All three fields are optional;
+omitting them keeps the existing water-tank behaviour unchanged.
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `thermal_mass` | number | from `volume` | Heat capacity directly in **kWh/K**, instead of a water volume - the natural unit for a building. |
+| `loss_coefficient` | number | none | Heat-loss coefficient **UA** in **kW/K**. When set, the standing loss is *state-dependent* - `UA*(T - outdoor)` - so the zone loses more when warmer and the optimiser can pre-heat the mass on cheap power and coast through a price peak. Mutually exclusive with a `building_demand` consumer (both model loss to outdoor). |
+| `thermal_inertia` | number | `0` | Lag in **hours** between heat input and the temperature response (same field as the classic thermal model). |
+
+Combine with the comfort fields above (`min/max_temperatures`, `desired_temperatures`)
+for a relaxation window - e.g. a house held 19.5-21.5 degC, fed by a
+weather-compensated heat pump:
+
+```json
+{
+  "id": "house",
+  "thermal_mass": 18,
+  "loss_coefficient": 0.79,
+  "start_temperature": 20.5,
+  "min_temperatures": [19.5, "..."],
+  "max_temperatures": [21.5, "..."],
+  "desired_temperatures": 20.5
+}
+```
+
+**Equivalence to the legacy single-load models.** With these fields the topology
+tank is a superset, so the older models are expressible as one-source tanks (their
+standalone code paths remain for backward compatibility):
+
+| Legacy model | As a topology tank |
+| --- | --- |
+| [`thermal_battery`](thermal_battery.md) | one source + `volume` + COP + a `draw_off` profile - already the same physics. |
+| [`thermal_config`](thermal_model.md) (RC house) | one source + `thermal_mass` + `loss_coefficient` + `thermal_inertia` + comfort band. The classic `cooling_constant` maps to `loss_coefficient / thermal_mass`. |
 
 ### `consumers`
 
