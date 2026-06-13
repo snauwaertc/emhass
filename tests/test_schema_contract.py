@@ -860,3 +860,19 @@ def test_array_control_plus_click_preserves_typed_value(js_src):
     assert r["error"] is None, f"+ click raised: {r['error']}"
     assert r["after"] == 2, f"expected 2 rows, got {r['after']}"
     assert r["first_value"] == "3", f"first row reset to {r['first_value']!r} (should stay '3')"
+
+
+def test_object_textarea_readable_in_dark_mode():
+    """The object-param JSON textarea (heat_topology editor) must get a light
+    text color in the dark-mode media query, like the inputs. Without it the
+    textarea renders near-black (#181818) on the dark background - unreadable.
+    Guards the dark-mode contrast regression."""
+    css = Path("src/emhass/static/style.css").read_text(encoding="utf-8")
+    dark_idx = css.find("@media (prefers-color-scheme: dark)")
+    assert dark_idx != -1, "no dark-mode media block in style.css"
+    # The textarea selector must appear inside the dark-mode block (after its
+    # start) so it inherits the light text color override.
+    assert css.find(".param textarea.param-json", dark_idx) != -1, (
+        "object-param textarea is not in the dark-mode color override; "
+        "it will render dark text on the dark background"
+    )
