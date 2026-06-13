@@ -3863,6 +3863,25 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             "Comfort penalty should pull the tank clearly toward the 60 C target",
         )
 
+    def test_shared_tank_fresh_build_honors_start_temperature(self):
+        """Each fresh shared-tank build pins the tank to its own
+        start_temperature (the first predicted temperature equals it). This is
+        the property the #970 cache bypass relies on: because the warm-start
+        cache is skipped for shared tanks, every MPC tick rebuilds and the live
+        tank temperature is honored instead of the first tick's stale value."""
+        for start in (55.0, 35.0):
+            opt, res = self._run_soft_tank(tank_extra={"start_temperature": start})
+            self.assertEqual(opt.optim_status, "Optimal")
+            tank_cols = [c for c in res.columns if "predicted_temp_heater" in c]
+            self.assertTrue(tank_cols, f"no tank temp column in {res.columns.tolist()}")
+            first_temp = res[tank_cols[0]].reset_index(drop=True).iloc[0]
+            self.assertAlmostEqual(
+                first_temp,
+                start,
+                places=1,
+                msg=f"Fresh build must start the tank at its configured {start} C, got {first_temp}",
+            )
+
     async def test_full_stack_runtime_tanks_end_to_end(self):
         """Integration of the #539 stack through the runtime path: manual
         shared_thermal_tanks passed as runtime parameters (Micr0mega's flow),
