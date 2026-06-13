@@ -3591,16 +3591,29 @@ class Optimization:
                     # under a synthetic index beyond the real loads to get a column.
                     predicted_temps[n_loads + tank_idx] = shared_pred_temp
 
-        # Couple each transfer to the temperature gradient: a passive/pumped emitter
-        # can only move heat from the hotter tank to the cooler one, at a rate
-        # bounded by the conductance * (T_from - T_to). Q >= 0 already forbids
-        # reverse flow when T_from <= T_to.
+        # Couple each transfer to the temperature gradient: a pumped emitter can only
+        # move heat from the hotter tank to the cooler one, at a rate bounded by the
+        # conductance * (T_from - T_to). One-directional, gated on/off by a binary.
+        # Without the binary, `q <= k*(from-to)` together with `q >= 0` has an EMPTY
+        # feasible set the instant the receiving tank is hotter than the feeder (e.g.
+        # an anchored buffer cooler than a warm pool) - making the WHOLE optimisation
+        # infeasible rather than simply setting the flow to zero. xfer_on=0 forces
+        # q=0 (feasible at any gradient); xfer_on=1 applies the gradient limit.
         for tr in transfers:
             q_var = transfer_vars[(tr["from"], tr["to"])]
             t_from = tank_temp_by_id.get(tr["from"])
             t_to = tank_temp_by_id.get(tr["to"])
             if t_from is not None and t_to is not None:
-                constraints.append(q_var <= tr["transfer_coefficient"] * (t_from - t_to))
+                k_xfer = tr["transfer_coefficient"]
+                qmax = tr["max_transfer_power"] / 1000.0
+                xfer_on = cp.Variable(
+                    self.num_timesteps, boolean=True, name=f"xfer_on_{tr['from']}_{tr['to']}"
+                )
+                big_m_xfer = k_xfer * SHARED_TANK_CAP_BIG_M_TEMP
+                constraints.append(
+                    q_var <= k_xfer * (t_from - t_to) + big_m_xfer * (1 - xfer_on)
+                )
+                constraints.append(q_var <= qmax * xfer_on)
 
         return predicted_temps, heating_demands, penalty_terms_total, q_inputs
 

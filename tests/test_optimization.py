@@ -3676,6 +3676,39 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(buffer.mean(), house.mean() + 5, "buffer should run much hotter than the room")
         self.assertTrue((buffer >= house - 0.1).all(), "transfer must respect the temperature gradient")
 
+    def test_tank_to_tank_transfer_feasible_when_receiver_hotter(self):
+        """Regression: a tank->tank transfer must stay feasible when the receiving
+        tank starts hotter than the feeder. The gradient bound k*(from-to) goes
+        negative, so `0 <= q <= k*(from-to)` would be an empty set and the whole
+        optimisation infeasible; the flow should simply be zero (pump off). Trips
+        in practice when an anchored buffer is cooler than a warm pool."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [20.0] * 48
+        self._setup_single_hp(supply_temperature=45.0, nominal=4000)
+        self.optim_conf["shared_thermal_tanks"] = [
+            {"id": "buffer", "load_ids": [0], "volume": 0.1, "start_temperature": 26.0,
+             "thermal_loss": 0.05, "min_temperatures": [20.0] * 48, "max_temperatures": [60.0] * 48},
+            {"id": "pool", "load_ids": [], "thermal_mass": 100.0, "loss_coefficient": 0.5,
+             "start_temperature": 28.0, "min_temperatures": [15.0] * 48,
+             "max_temperatures": [30.0] * 48, "desired_temperatures": [27.0] * 48,
+             "penalty_factor": 5},
+        ]
+        self.optim_conf["tank_transfers"] = [
+            {"from": "buffer", "to": "pool", "transfer_coefficient": 2.0, "max_transfer_power": 20000}
+        ]
+        opt = self.create_optimization()
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            np.full(48, 0.10),
+            np.full(48, 0.02),
+        )
+        self.assertIn(
+            "Optimal", str(res["optim_status"].iloc[0]),
+            "transfer must stay feasible when the receiver starts hotter than the feeder",
+        )
+
     def _run_hp_booster_tank(
         self,
         hp_cap,
