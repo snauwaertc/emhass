@@ -3319,107 +3319,134 @@ class Optimization:
         extra_constraints = []
         refined = False
         for e in entries:
-            temp = e["predicted_temp"].value
-            if temp is None:
-                continue
-            hp = e["hp"]
-            cop_now = np.asarray(hp["cop_param"].value, dtype=float)
-            cop_consistent = utils.cop_from_tank_temperature(
-                temp[:n], hp["carnot"], e["outdoor"], approach=hp["approach"]
-            )
-            max_err = float(np.max(np.abs(cop_now - cop_consistent)))
-            if mode == "auto" and max_err <= tol:
+            # Isolate each tank: a bad config or solve on one tank must not abort the
+            # refinement of the others (it degrades to that tank's static COP).
+            try:
+                temp = e["predicted_temp"].value
+                if temp is None:
+                    continue
+                hp = e["hp"]
+                cop_now = np.asarray(hp["cop_param"].value, dtype=float)
+                cop_consistent = utils.cop_from_tank_temperature(
+                    temp[:n], hp["carnot"], e["outdoor"][:n], approach=hp["approach"]
+                )
+                max_err = float(np.max(np.abs(cop_now - cop_consistent)))
+                if mode == "auto" and max_err <= tol:
+                    self.logger.info(
+                        "DP COP solver: tank '%s' COP already consistent (err %.2f <= %.2f) - skipped",
+                        e["tank_id"],
+                        max_err,
+                        tol,
+                    )
+                    continue  # static solve already self-consistent: DP not needed here
+                # External demand (kW) the buffer must supply: draw-off + net outflow.
+                # Standing loss is left to the DP so it captures the loss-vs-temperature
+                # trade-off that drives the super-heating decision.
+                xfer = e["xfer_net"]
+                xfer_val = np.asarray(getattr(xfer, "value", xfer), dtype=float)
+                ext = e["heating_demand"][:n].astype(float).copy()
+                ext[: len(xfer_val)] -= xfer_val  # xfer_net = inflow - outflow
+                coupled = e.get("coupled")
+                if coupled is not None and coupled.get("q_var") is not None:
+                    # ext currently = draw-off + outflow-to-coupled + other outflow. The
+                    # flow to the coupled store is the DP's coupling decision (re-optimised),
+                    # not a fixed demand, so subtract it back out of the demand.
+                    pool_xfer = np.asarray(coupled["q_var"].value, dtype=float) * dt
+                    m = min(len(xfer_val), len(pool_xfer))
+                    ext[:m] -= pool_xfer[:m]
+                demand_kw = np.maximum(ext, 0.0) / dt
+                outdoor_arr = np.asarray(e["outdoor"], dtype=float)[:n]
+                outdoor_ref = float(np.mean(outdoor_arr))
+                backup = e["backup"]
+                backup_price = 1e6
+                if backup is not None and getattr(self, "param_cost_per_load", None):
+                    idx = backup["load_idx"]
+                    if (
+                        idx < len(self.param_cost_per_load)
+                        and self.param_cost_per_load[idx].value is not None
+                    ):
+                        backup_price = float(np.mean(self.param_cost_per_load[idx].value))
+                coupled_kwargs = {}
+                if coupled is not None:
+                    coupled_kwargs = {
+                        "coupled_heat_capacity": coupled["heat_capacity"],
+                        "coupled_loss_coeff": coupled["loss_coefficient"],
+                        "coupled_min_temp": coupled["min_temp"],
+                        "coupled_max_temp": coupled["max_temp"],
+                        "coupling_coeff": coupled["coupling_coeff"],
+                        "coupling_max_power": coupled["coupling_max_power"] / 1000.0,
+                    }
+                params = ThermalDPParams(
+                    heat_capacity=1.0 / e["conversion"],
+                    loss_coeff=(e["loss_coefficient"] or 0.0),
+                    min_temp=e["min_temp"],
+                    max_temp=e["max_temp"],
+                    carnot_efficiency=hp["carnot"],
+                    hx_approach=hp["approach"],
+                    hp_max_power=hp["nominal_power"] / 1000.0,
+                    backup_efficiency=(backup["efficiency"] if backup else 0.95),
+                    backup_max_power=(backup["nominal_power"] / 1000.0 if backup else 0.0),
+                    backup_price=backup_price,
+                    demand_kw=demand_kw,
+                    ambient_temperature=outdoor_ref,  # EMHASS tanks lose to outdoor
+                    **coupled_kwargs,
+                )
+                res = solve_thermal_dp(
+                    price,
+                    outdoor_arr,
+                    params,
+                    time_step=dt,
+                    tank_start=e["start_temperature"],
+                    coupled_start=(coupled["start_temperature"] if coupled else 26.5),
+                )
+                if res.meta.get("infeasible"):
+                    # Demand exceeds what the heat pump and backup can deliver every step:
+                    # the DP has no feasible trajectory, so do not correct the COP from a
+                    # meaningless plan - keep this tank's static COP.
+                    self.logger.warning(
+                        "DP COP solver: tank '%s' demand exceeds deliverable heat - "
+                        "skipping its refinement, keeping the static COP",
+                        e["tank_id"],
+                    )
+                    continue
+                dp_temp = np.asarray(res.tank_trajectory[:n], dtype=float)
+                hp["cop_param"].value = utils.cop_from_tank_temperature(
+                    dp_temp, hp["carnot"], outdoor_arr, approach=hp["approach"]
+                )
+                extra_constraints.append(e["predicted_temp"] <= float(dp_temp.max()) + 1.0)
+                refined = True
                 self.logger.info(
-                    "DP COP solver: tank '%s' COP already consistent (err %.2f <= %.2f) - skipped",
+                    "DP COP refinement on tank '%s': COP inconsistency %.2f > %.2f - "
+                    "re-optimised buffer to peak %.0f C, gas %.1f kWh",
                     e["tank_id"],
                     max_err,
                     tol,
+                    dp_temp.max(),
+                    float(np.sum(res.backup_input_per_step) * dt),
                 )
-                continue  # static solve already self-consistent: DP not needed here
-            # External demand (kW) the buffer must supply: draw-off + net outflow.
-            # Standing loss is left to the DP so it captures the loss-vs-temperature
-            # trade-off that drives the super-heating decision.
-            xfer = e["xfer_net"]
-            xfer_val = np.asarray(getattr(xfer, "value", xfer), dtype=float)
-            ext = e["heating_demand"][:n].astype(float).copy()
-            ext[: len(xfer_val)] -= xfer_val  # xfer_net = inflow - outflow
-            coupled = e.get("coupled")
-            if coupled is not None and coupled.get("q_var") is not None:
-                # ext currently = draw-off + outflow-to-coupled + other outflow. The
-                # flow to the coupled store is the DP's coupling decision (re-optimised),
-                # not a fixed demand, so subtract it back out of the demand.
-                pool_xfer = np.asarray(coupled["q_var"].value, dtype=float) * dt
-                m = min(len(xfer_val), len(pool_xfer))
-                ext[:m] -= pool_xfer[:m]
-            demand_kw = np.maximum(ext, 0.0) / dt
-            outdoor_arr = np.asarray(e["outdoor"], dtype=float)[:n]
-            outdoor_ref = float(np.mean(outdoor_arr))
-            backup = e["backup"]
-            backup_price = 1e6
-            if backup is not None and getattr(self, "param_cost_per_load", None):
-                idx = backup["load_idx"]
-                if (
-                    idx < len(self.param_cost_per_load)
-                    and self.param_cost_per_load[idx].value is not None
-                ):
-                    backup_price = float(np.mean(self.param_cost_per_load[idx].value))
-            coupled_kwargs = {}
-            if coupled is not None:
-                coupled_kwargs = {
-                    "coupled_heat_capacity": coupled["heat_capacity"],
-                    "coupled_loss_coeff": coupled["loss_coefficient"],
-                    "coupled_min_temp": coupled["min_temp"],
-                    "coupled_max_temp": coupled["max_temp"],
-                    "coupling_coeff": coupled["coupling_coeff"],
-                    "coupling_max_power": coupled["coupling_max_power"] / 1000.0,
-                }
-            params = ThermalDPParams(
-                heat_capacity=1.0 / e["conversion"],
-                loss_coeff=(e["loss_coefficient"] or 0.0),
-                min_temp=e["min_temp"],
-                max_temp=e["max_temp"],
-                carnot_efficiency=hp["carnot"],
-                hx_approach=hp["approach"],
-                hp_max_power=hp["nominal_power"] / 1000.0,
-                backup_efficiency=(backup["efficiency"] if backup else 0.95),
-                backup_max_power=(backup["nominal_power"] / 1000.0 if backup else 0.0),
-                backup_price=backup_price,
-                demand_kw=demand_kw,
-                ambient_temperature=outdoor_ref,  # EMHASS tanks lose to outdoor
-                **coupled_kwargs,
-            )
-            res = solve_thermal_dp(
-                price,
-                outdoor_arr,
-                params,
-                time_step=dt,
-                tank_start=e["start_temperature"],
-                coupled_start=(coupled["start_temperature"] if coupled else 26.5),
-            )
-            dp_temp = np.asarray(res.tank_trajectory[:n], dtype=float)
-            hp["cop_param"].value = utils.cop_from_tank_temperature(
-                dp_temp, hp["carnot"], e["outdoor"], approach=hp["approach"]
-            )
-            extra_constraints.append(e["predicted_temp"] <= float(dp_temp.max()) + 1.0)
-            refined = True
-            self.logger.info(
-                "DP COP refinement on tank '%s': COP inconsistency %.2f > %.2f - "
-                "re-optimised buffer to peak %.0f C, gas %.1f kWh",
-                e["tank_id"],
-                max_err,
-                tol,
-                dp_temp.max(),
-                float(np.sum(res.backup_input_per_step) * dt),
-            )
+            except Exception as exc:
+                self.logger.warning(
+                    "DP COP refinement failed for tank '%s' (%s); skipping it, keeping its static COP",
+                    e.get("tank_id"),
+                    exc,
+                )
+                continue
         if not refined:
             return
         prob2 = cp.Problem(self.prob.objective, self.prob.constraints + extra_constraints)
         try:
             prob2.solve(solver=selected_solver, warm_start=True, **solver_opts)
-            if prob2.value is not None and str(prob2.status).lower() not in (
+            # Only accept the re-solve if it is genuinely good. A timed-out re-solve
+            # ("user_limit") can return a feasible-but-suboptimal value, but the main
+            # return path treats user_limit/None as failure - so accepting it here would
+            # replace the good static solve and then yield an empty plan. Reject the same
+            # statuses the main solver guard rejects.
+            bad_status = prob2.status is None or str(prob2.status).lower() in (
                 "infeasible",
                 "unbounded",
-            ):
+                "user_limit",
+            )
+            if prob2.value is not None and not bad_status:
                 self.prob = prob2
             else:
                 self.logger.warning(

@@ -2,7 +2,12 @@
 
 import numpy as np
 
-from emhass.thermal_dp import MAX_COUPLED_STATES, ThermalDPParams, solve_thermal_dp
+from emhass.thermal_dp import (
+    MAX_COUPLED_STATES,
+    MAX_TANK_STATES,
+    ThermalDPParams,
+    solve_thermal_dp,
+)
 
 
 def _spread_price(n=48, dt=0.5, cheap=0.05, dear=0.50, start_h=8):
@@ -109,3 +114,40 @@ def test_dp_caps_coupled_state_count():
     )
     res_micro = solve_thermal_dp(np.full(6, 0.2), outdoor_temperature=8.0, params=micro)
     assert res_micro.meta["coupled_states"] <= MAX_COUPLED_STATES
+
+
+def test_dp_caps_tank_state_count():
+    """A fine grid_step on a wide band must not blow up the heat-pump-store grid: it is
+    coarsened to stay within MAX_TANK_STATES (bounding runtime and keeping the int16
+    policy array from overflowing). The default 0.5 C step stays under the cap."""
+    fine = ThermalDPParams(min_temp=25.0, max_temp=65.0, grid_step=0.1, demand_kw=2.0)
+    res = solve_thermal_dp(_spread_price(), outdoor_temperature=8.0, params=fine)
+    assert res.meta["tank_states"] <= MAX_TANK_STATES  # 401 raw -> capped
+    # The default 0.5 C step is unchanged (well under the cap).
+    default = ThermalDPParams(min_temp=25.0, max_temp=65.0, grid_step=0.5, demand_kw=2.0)
+    res_def = solve_thermal_dp(_spread_price(), outdoor_temperature=8.0, params=default)
+    assert res_def.meta["tank_states"] == 81
+
+
+def test_dp_flags_infeasible_when_demand_exceeds_deliverable_heat():
+    """A store starting at its floor (no stored heat to drain) with demand that exceeds
+    what the heat pump can deliver every step and no backup has no feasible trajectory -
+    the DP must flag it (meta['infeasible'], total_cost=inf) rather than return a
+    plausible-looking plan that silently violates the energy balance."""
+    params = ThermalDPParams(
+        hp_max_power=1.0, backup_max_power=0.0, demand_kw=7.0, min_temp=30.0, max_temp=60.0
+    )
+    # start at the floor: cannot drain, and 3.5 kWh/step demand >> HP's ~2 kWh/step max.
+    res = solve_thermal_dp(
+        np.full(4, 0.2), outdoor_temperature=10.0, params=params, tank_start=30.0
+    )
+    assert res.meta["infeasible"] is True
+    assert res.total_cost == float("inf")
+
+    # The same store with a capable backup IS feasible (sanity: the flag is not stuck on).
+    ok = ThermalDPParams(
+        hp_max_power=1.0, backup_max_power=10.0, demand_kw=7.0, min_temp=30.0, max_temp=60.0
+    )
+    res_ok = solve_thermal_dp(np.full(4, 0.2), outdoor_temperature=10.0, params=ok, tank_start=30.0)
+    assert res_ok.meta["infeasible"] is False
+    assert np.isfinite(res_ok.total_cost)

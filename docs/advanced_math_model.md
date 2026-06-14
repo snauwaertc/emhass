@@ -383,8 +383,9 @@ The refinement is controlled by two `optim_conf` options:
 - `cop_solver` (`auto` | `dp` | `static`): `auto` runs the consistency check and
   engages the DP only when the static COP is inconsistent (the default); `dp` always
   runs it; `static` disables it and keeps the pure-LP plan.
-- `cop_solver_tolerance` (float, °C-equivalent COP error): how large a COP
-  discrepancy `auto` tolerates before engaging the DP.
+- `cop_solver_tolerance` (float, in COP units): how large a COP discrepancy
+  (the max absolute difference between the COP the solve used and the COP at the
+  temperature it achieved) `auto` tolerates before engaging the DP.
 
 ## The EMHASS optimizations
 
