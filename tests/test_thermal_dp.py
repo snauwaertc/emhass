@@ -44,3 +44,45 @@ def test_dp_solves_quickly():
     assert res.solve_seconds < 10.0
     assert res.coupled_trajectory is not None
     assert len(res.tank_trajectory) == 49  # N + 1
+
+
+def test_dp_uses_per_step_outdoor_not_the_mean():
+    """The COP follows the per-step outdoor temperature, not its average. With a warm
+    first half (high COP) and a cold second half (low COP), the heat pump should bank
+    heat early even though the price is marginally cheaper late - a schedule the
+    mean-outdoor approximation (uniform COP) would not produce."""
+    N = 6
+    # Price marginally cheaper in the (cold) second half: a uniform-COP solver would
+    # lean late; the true per-step COP makes the warm first half clearly cheaper.
+    price = np.array([0.21, 0.21, 0.21, 0.20, 0.20, 0.20])
+    warm_then_cold = np.array([15.0, 15.0, 15.0, -5.0, -5.0, -5.0])
+    params = ThermalDPParams(
+        heat_capacity=2.0, loss_coeff=0.0, min_temp=44.0, max_temp=60.0,
+        hp_max_power=3.0, backup_max_power=0.0, demand_kw=2.0,
+    )
+    per_step = solve_thermal_dp(price, warm_then_cold, params, tank_start=45.0)
+    mean_run = solve_thermal_dp(price, float(np.mean(warm_then_cold)), params, tank_start=45.0)
+
+    def early_share(res):
+        total = res.hp_electric_per_step.sum()
+        return res.hp_electric_per_step[:3].sum() / total if total > 0 else 0.0
+
+    # The per-step run concentrates HP electricity in the warm, high-COP first half;
+    # the mean-outdoor run (uniform COP, marginally cheaper late) does not.
+    assert early_share(per_step) > early_share(mean_run) + 0.2
+
+
+def test_dp_caps_coupled_state_count():
+    """A pathologically wide coupled band must not blow up the state space: the grid
+    step is coarsened so the coupled state count stays bounded (and the DP stays fast),
+    while the band itself is preserved."""
+    params = ThermalDPParams(
+        coupled_heat_capacity=163.0,
+        coupled_min_temp=0.0, coupled_max_temp=100.0,  # 1001 states at the raw 0.1 step
+        coupled_grid_step=0.1,
+        demand_kw=2.0,
+    )
+    res = solve_thermal_dp(_spread_price(), outdoor_temperature=8.0, params=params)
+    assert res.meta["coupled_states"] <= 64  # MAX_COUPLED_STATES
+    assert res.solve_seconds < 10.0
+    assert res.coupled_trajectory is not None
