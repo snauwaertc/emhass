@@ -3885,13 +3885,15 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
         self.assertGreater(total, 0, "Sources must dispatch to hold the 45-60 C band")
 
-    def test_cap_survives_relaxed_lp_fallback(self):
-        """The cap gate is a physical limit, so it must keep holding in the
-        relaxed-LP fallback (which keeps its booleans, like the tank's hard
-        min/max temperatures). Two mutually exclusive standard loads needing
-        13 h each on a 24 h horizon make the MILP provably infeasible; the
-        relaxation drops mutual exclusion and solves, but the heat pump must
-        still stay off above its max_supply_temperature."""
+    def test_mutual_exclusion_survives_relaxed_lp_fallback(self):
+        """Mutual exclusion is a physical constraint (one source cannot drive two
+        targets at once), so it must survive the relaxed-LP fallback rather than be
+        silently dropped (#539, reported by Micr0mega: a shared-tank source in a
+        mutual_exclusion group ran both loads at once). Two mutually exclusive loads
+        needing 13 h each on a 24 h horizon are infeasible by construction: because
+        the fallback keeps mutual exclusion (alongside the tank's hard min/max and
+        the max_supply_temperature cap), the run is now honestly reported Infeasible
+        instead of masked as 'Optimal (Relaxed)' with both loads scheduled at once."""
         self.df_input_data_dayahead = self.prepare_forecast_data()
         self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
         min_t = [45.0] * 48
@@ -3943,19 +3945,17 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         opt = self.create_optimization()
         ulc = self.df_input_data_dayahead[opt.var_load_cost].values
         upp = self.df_input_data_dayahead[opt.var_prod_price].values
-        res = opt.perform_optimization(
+        opt.perform_optimization(
             self.df_input_data_dayahead,
             self.p_pv_forecast.values.ravel(),
             self.p_load_forecast.values.ravel(),
             ulc,
             upp,
         )
-        self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
-        booster = res["P_deferrable1"].reset_index(drop=True)
-        self.assertGreater(booster.sum(), 0, "Booster must serve the band above the HP cap")
-        self._assert_hp_off_above_cap(
-            res, 53.0, "Relaxed fallback must not weaken the max_supply_temperature gate"
-        )
+        # 26 h of mutually exclusive runtime cannot fit a 24 h horizon. The relaxed
+        # rebuild keeps mutual exclusion, so the run is honestly reported Infeasible
+        # rather than dropping the constraint to mask it as a (both-loads) solve.
+        self.assertEqual(opt.optim_status, "Infeasible")
 
     def _run_soft_tank(self, tank_extra=None, source0_extra=None, source1_extra=None):
         """Helper: one shared tank fed by a cheap 'HP' (load 0, flat COP 3.0)
