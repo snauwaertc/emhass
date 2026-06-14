@@ -91,7 +91,9 @@ def _cop_curve(grid: np.ndarray, p: ThermalDPParams, outdoor: float | np.ndarray
     if outdoor.ndim == 0:
         cop = p.carnot_efficiency * (supply + 273.15) / (supply - outdoor)
     else:
-        cop = p.carnot_efficiency * (supply[None, :] + 273.15) / (supply[None, :] - outdoor[:, None])
+        cop = (
+            p.carnot_efficiency * (supply[None, :] + 273.15) / (supply[None, :] - outdoor[:, None])
+        )
     return np.clip(cop, p.cop_bounds[0], p.cop_bounds[1])
 
 
@@ -150,8 +152,7 @@ def solve_thermal_dp(
             # Resolution from the configured step, but hard-capped at MAX_COUPLED_STATES.
             # linspace (not arange) so the count is exact - arange's float endpoint fudge
             # could otherwise blow the count up on a tiny span.
-            npts = min(MAX_COUPLED_STATES,
-                       max(2, int(round(span / p.coupled_grid_step)) + 1))
+            npts = min(MAX_COUPLED_STATES, max(2, int(round(span / p.coupled_grid_step)) + 1))
             cgrid = np.linspace(p.coupled_min_temp, p.coupled_max_temp, npts)
         else:
             cgrid = np.array([p.coupled_min_temp])

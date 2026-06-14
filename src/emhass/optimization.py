@@ -2039,8 +2039,7 @@ class Optimization:
         if not config_list:
             return
         valid = [
-            i for i, v in enumerate(config_list)
-            if v is not None and not np.isnan(v) and 0 < i < n
+            i for i, v in enumerate(config_list) if v is not None and not np.isnan(v) and 0 < i < n
         ]
         if not valid:
             return
@@ -2065,8 +2064,7 @@ class Optimization:
         below desired (heat) / above (cool). Returns the summed penalty term, or
         None when there is no valid target."""
         valid = [
-            i for i, v in enumerate(desired_list)
-            if v is not None and not np.isnan(v) and 0 < i < n
+            i for i, v in enumerate(desired_list) if v is not None and not np.isnan(v) and 0 < i < n
         ]
         if not valid:
             return None
@@ -2909,7 +2907,8 @@ class Optimization:
                     "cop_static": cops,
                     "carnot": float(src_cfg.get("carnot_efficiency", 0.4)),
                     "approach": float(self.optim_conf.get("cop_hx_approach", 5.0)),
-                    "nominal_power": float(src_cfg.get("nominal_power", 0.0)) or float(
+                    "nominal_power": float(src_cfg.get("nominal_power", 0.0))
+                    or float(
                         max(np.atleast_1d(self.optim_conf["nominal_power_of_deferrable_loads"][k]))
                     ),
                 }
@@ -3018,8 +3017,9 @@ class Optimization:
         if max_deficit > 1e-6:
             # Never steeper than the conservative rate, and small shortfalls are still
             # spread over at least the minimum window so recovery stays gentle.
-            rate = min(SHARED_TANK_START_RECOVERY_RATE,
-                       max_deficit / SHARED_TANK_START_RECOVERY_STEPS)
+            rate = min(
+                SHARED_TANK_START_RECOVERY_RATE, max_deficit / SHARED_TANK_START_RECOVERY_STEPS
+            )
             window = int(np.ceil(max_deficit / rate))
             min_temperatures_list = list(min_temperatures_list)
             for t in range(min(window, len(min_temperatures_list))):
@@ -3030,7 +3030,10 @@ class Optimization:
             self.logger.info(
                 "Shared tank '%s': start %.1f C below a near-term floor (max shortfall "
                 "%.1f C) - ramping the min back into band over %d steps to stay feasible",
-                tank_id, start_temperature, max_deficit, window,
+                tank_id,
+                start_temperature,
+                max_deficit,
+                window,
             )
 
         # Hard min/max temperature bounds (shared helper; index 0 already pinned).
@@ -3163,16 +3166,21 @@ class Optimization:
                     continue
                 bcfg = self._get_load_source_config(k)
                 if bcfg.get("efficiency") is not None:  # a flat-efficiency backup (gas/oil)
-                    bnom = max(np.atleast_1d(self.optim_conf["nominal_power_of_deferrable_loads"][k]))
-                    backup = {"load_idx": k, "efficiency": float(bcfg["efficiency"]),
-                              "nominal_power": float(bnom)}
+                    bnom = max(
+                        np.atleast_1d(self.optim_conf["nominal_power_of_deferrable_loads"][k])
+                    )
+                    backup = {
+                        "load_idx": k,
+                        "efficiency": float(bcfg["efficiency"]),
+                        "nominal_power": float(bnom),
+                    }
                     break
             # Optional coupled store: the largest-capacity tank this tank feeds (e.g. a
             # pool). The DP refines the two jointly so super-heating accounts for what
             # the coupled store can bank. Its comfort floor is desired-1 C (not the raw
             # min) so the DP keeps it near target rather than parking it at the floor.
             coupled = None
-            for tr in (self._get_tank_transfers() if transfer_vars else []):
+            for tr in self._get_tank_transfers() if transfer_vars else []:
                 if tr["from"] != tank_id:
                     continue
                 tgt = next(
@@ -3184,45 +3192,67 @@ class Optimization:
                 if tm is not None:
                     hc = float(tm)
                 elif tgt.get("volume"):
-                    hc = (float(tgt.get("density", 1000)) * float(tgt.get("heat_capacity", 4.186))
-                          * float(tgt["volume"]) / 3600.0)
+                    hc = (
+                        float(tgt.get("density", 1000))
+                        * float(tgt.get("heat_capacity", 4.186))
+                        * float(tgt["volume"])
+                        / 3600.0
+                    )
                 else:
                     continue
                 if hc < 20.0 or (coupled is not None and hc <= coupled["heat_capacity"]):
                     continue  # couple only to a substantial banking store, the largest one
                 des = tgt.get("desired_temperatures")
-                des_v = (min(np.atleast_1d(des)) if des is not None else None)
+                des_v = min(np.atleast_1d(des)) if des is not None else None
                 cmins = [v for v in (tgt.get("min_temperatures") or []) if v is not None]
                 cmaxs = [v for v in (tgt.get("max_temperatures") or []) if v is not None]
-                floor = (float(des_v) - 1.0) if des_v is not None else (
-                    float(min(cmins)) if cmins else float(tgt.get("start_temperature", 26.0)) - 1.0)
+                floor = (
+                    (float(des_v) - 1.0)
+                    if des_v is not None
+                    else (
+                        float(min(cmins))
+                        if cmins
+                        else float(tgt.get("start_temperature", 26.0)) - 1.0
+                    )
+                )
                 coupled = {
                     "heat_capacity": hc,
                     "loss_coefficient": float(tgt.get("loss_coefficient") or 0.0),
                     "min_temp": floor,
-                    "max_temp": float(max(cmaxs)) if cmaxs else float(tgt.get("start_temperature", 30.0)) + 3.0,
+                    "max_temp": float(max(cmaxs))
+                    if cmaxs
+                    else float(tgt.get("start_temperature", 30.0)) + 3.0,
                     "start_temperature": float(tgt.get("start_temperature", floor + 0.5)),
                     "coupling_coeff": float(tr.get("transfer_coefficient", 1.0)),
                     "coupling_max_power": float(tr.get("max_transfer_power", 20000.0)),
                     "q_var": transfer_vars.get((tr["from"], tr["to"])),
                 }
-            self._dp_tank_entries.append({
-                "coupled": coupled,
-                "tank_id": tank_id,
-                "predicted_temp": predicted_temp,
-                "conversion": float(conversion),
-                "heating_demand": np.asarray(heating_demand, dtype=float),
-                "xfer_net": xfer_net,  # cvxpy expr or zeros, length required_len-1
-                "loss_coefficient": loss_coefficient,
-                "thermal_losses": (None if loss_coefficient is not None
-                                   else np.asarray(thermal_losses, dtype=float)),
-                "outdoor": np.asarray(outdoor_temp_arr, dtype=float),
-                "start_temperature": float(start_temperature),
-                "min_temp": min((v for v in min_temperatures_list if v is not None), default=20.0),
-                "max_temp": max((v for v in max_temperatures_list if v is not None), default=65.0),
-                "hp": dp_hp_info,
-                "backup": backup,
-            })
+            self._dp_tank_entries.append(
+                {
+                    "coupled": coupled,
+                    "tank_id": tank_id,
+                    "predicted_temp": predicted_temp,
+                    "conversion": float(conversion),
+                    "heating_demand": np.asarray(heating_demand, dtype=float),
+                    "xfer_net": xfer_net,  # cvxpy expr or zeros, length required_len-1
+                    "loss_coefficient": loss_coefficient,
+                    "thermal_losses": (
+                        None
+                        if loss_coefficient is not None
+                        else np.asarray(thermal_losses, dtype=float)
+                    ),
+                    "outdoor": np.asarray(outdoor_temp_arr, dtype=float),
+                    "start_temperature": float(start_temperature),
+                    "min_temp": min(
+                        (v for v in min_temperatures_list if v is not None), default=20.0
+                    ),
+                    "max_temp": max(
+                        (v for v in max_temperatures_list if v is not None), default=65.0
+                    ),
+                    "hp": dp_hp_info,
+                    "backup": backup,
+                }
+            )
 
         return predicted_temp, heating_demand, penalty_term
 
@@ -3263,6 +3293,7 @@ class Optimization:
         if not entries or mode == "static" or self.prob is None or self.prob.value is None:
             return
         from emhass.thermal_dp import ThermalDPParams, solve_thermal_dp
+
         tol = float(self.optim_conf.get("cop_solver_tolerance", 0.5))
         dt = self.time_step
         n = self.num_timesteps
@@ -3282,7 +3313,8 @@ class Optimization:
             price = tariff
         self.logger.info(
             "DP COP solver (mode=%s): eligible heating-curve heat-pump tanks %s",
-            mode, [e.get("tank_id") for e in entries],
+            mode,
+            [e.get("tank_id") for e in entries],
         )
         extra_constraints = []
         refined = False
@@ -3299,7 +3331,9 @@ class Optimization:
             if mode == "auto" and max_err <= tol:
                 self.logger.info(
                     "DP COP solver: tank '%s' COP already consistent (err %.2f <= %.2f) - skipped",
-                    e["tank_id"], max_err, tol,
+                    e["tank_id"],
+                    max_err,
+                    tol,
                 )
                 continue  # static solve already self-consistent: DP not needed here
             # External demand (kW) the buffer must supply: draw-off + net outflow.
@@ -3324,18 +3358,21 @@ class Optimization:
             backup_price = 1e6
             if backup is not None and getattr(self, "param_cost_per_load", None):
                 idx = backup["load_idx"]
-                if idx < len(self.param_cost_per_load) and self.param_cost_per_load[idx].value is not None:
+                if (
+                    idx < len(self.param_cost_per_load)
+                    and self.param_cost_per_load[idx].value is not None
+                ):
                     backup_price = float(np.mean(self.param_cost_per_load[idx].value))
             coupled_kwargs = {}
             if coupled is not None:
-                coupled_kwargs = dict(
-                    coupled_heat_capacity=coupled["heat_capacity"],
-                    coupled_loss_coeff=coupled["loss_coefficient"],
-                    coupled_min_temp=coupled["min_temp"],
-                    coupled_max_temp=coupled["max_temp"],
-                    coupling_coeff=coupled["coupling_coeff"],
-                    coupling_max_power=coupled["coupling_max_power"] / 1000.0,
-                )
+                coupled_kwargs = {
+                    "coupled_heat_capacity": coupled["heat_capacity"],
+                    "coupled_loss_coeff": coupled["loss_coefficient"],
+                    "coupled_min_temp": coupled["min_temp"],
+                    "coupled_max_temp": coupled["max_temp"],
+                    "coupling_coeff": coupled["coupling_coeff"],
+                    "coupling_max_power": coupled["coupling_max_power"] / 1000.0,
+                }
             params = ThermalDPParams(
                 heat_capacity=1.0 / e["conversion"],
                 loss_coeff=(e["loss_coefficient"] or 0.0),
@@ -3352,7 +3389,11 @@ class Optimization:
                 **coupled_kwargs,
             )
             res = solve_thermal_dp(
-                price, outdoor_arr, params, time_step=dt, tank_start=e["start_temperature"],
+                price,
+                outdoor_arr,
+                params,
+                time_step=dt,
+                tank_start=e["start_temperature"],
                 coupled_start=(coupled["start_temperature"] if coupled else 26.5),
             )
             dp_temp = np.asarray(res.tank_trajectory[:n], dtype=float)
@@ -3364,7 +3405,10 @@ class Optimization:
             self.logger.info(
                 "DP COP refinement on tank '%s': COP inconsistency %.2f > %.2f - "
                 "re-optimised buffer to peak %.0f C, gas %.1f kWh",
-                e["tank_id"], max_err, tol, dp_temp.max(),
+                e["tank_id"],
+                max_err,
+                tol,
+                dp_temp.max(),
                 float(np.sum(res.backup_input_per_step) * dt),
             )
         if not refined:
@@ -3372,11 +3416,15 @@ class Optimization:
         prob2 = cp.Problem(self.prob.objective, self.prob.constraints + extra_constraints)
         try:
             prob2.solve(solver=selected_solver, warm_start=True, **solver_opts)
-            if prob2.value is not None and str(prob2.status).lower() not in ("infeasible", "unbounded"):
+            if prob2.value is not None and str(prob2.status).lower() not in (
+                "infeasible",
+                "unbounded",
+            ):
                 self.prob = prob2
             else:
-                self.logger.warning("DP COP refinement re-solve status %s; keeping static solve",
-                                    prob2.status)
+                self.logger.warning(
+                    "DP COP refinement re-solve status %s; keeping static solve", prob2.status
+                )
         except Exception as exc:
             self.logger.warning("DP COP refinement re-solve failed (%s); keeping static solve", exc)
 

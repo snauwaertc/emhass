@@ -3500,9 +3500,18 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         # Heating-curve HP: the curve caps supply at 40 C (optimistic COP), but the
         # tank may be driven to 60 C - so the static COP is wrong once it super-heats.
         self.optim_conf["def_load_config"] = [
-            {"thermal_source": {
-                "heating_curve": {"slope": 0.7, "offset": 30, "min_supply": 25, "max_supply": 40},
-                "carnot_efficiency": 0.45, "max_supply_temperature": 62}},
+            {
+                "thermal_source": {
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 30,
+                        "min_supply": 25,
+                        "max_supply": 40,
+                    },
+                    "carnot_efficiency": 0.45,
+                    "max_supply_temperature": 62,
+                }
+            },
         ]
         self.optim_conf["shared_thermal_tanks"] = [
             {
@@ -3554,7 +3563,8 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Optimal", str(res_auto["optim_status"].iloc[0]))
         # The DP-refined plan does not bank the buffer as hot as the COP-blind plan.
         self.assertLess(
-            temp_auto.max(), temp_static.max() - 2.0,
+            temp_auto.max(),
+            temp_static.max() - 2.0,
             f"auto peak {temp_auto.max():.1f} should be well below static peak {temp_static.max():.1f}",
         )
         # And the refinement actually engaged (a heat-pump tank was registered).
@@ -3570,23 +3580,39 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             # Heating-curve HP but a tight 33-37 C band: the tank cannot super-heat past
             # the curve, so the static COP stays consistent and the DP must not engage.
             self.optim_conf["def_load_config"] = [
-                {"thermal_source": {
-                    "heating_curve": {"slope": 0.7, "offset": 38, "min_supply": 28, "max_supply": 45},
-                    "carnot_efficiency": 0.45, "max_supply_temperature": 45}},
+                {
+                    "thermal_source": {
+                        "heating_curve": {
+                            "slope": 0.7,
+                            "offset": 38,
+                            "min_supply": 28,
+                            "max_supply": 45,
+                        },
+                        "carnot_efficiency": 0.45,
+                        "max_supply_temperature": 45,
+                    }
+                },
             ]
             self.optim_conf["shared_thermal_tanks"] = [
                 {
-                    "id": "buffer", "load_ids": [0], "thermal_mass": 3.0,
-                    "loss_coefficient": 0.2, "start_temperature": 35.0,
-                    "min_temperatures": [33.0] * 48, "max_temperatures": [37.0] * 48,
+                    "id": "buffer",
+                    "load_ids": [0],
+                    "thermal_mass": 3.0,
+                    "loss_coefficient": 0.2,
+                    "start_temperature": 35.0,
+                    "min_temperatures": [33.0] * 48,
+                    "max_temperatures": [37.0] * 48,
                     "draw_off_demand": [1.0] * 48,
                 }
             ]
             self.optim_conf["cop_solver"] = solver
             opt = self.create_optimization()
             res = opt.perform_optimization(
-                self.df_input_data_dayahead, self.p_pv_forecast.values.ravel(),
-                self.p_load_forecast.values.ravel(), np.full(48, 0.10), np.full(48, 0.02),
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                np.full(48, 0.10),
+                np.full(48, 0.02),
             )
             self.assertIn("Optimal", str(res["optim_status"].iloc[0]))
 
@@ -3598,29 +3624,58 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.df_input_data_dayahead["outdoor_temperature_forecast"] = [5.0] * 48
         self._setup_single_hp(nominal=8000)
         self.optim_conf["def_load_config"] = [
-            {"thermal_source": {
-                "heating_curve": {"slope": 0.7, "offset": 30, "min_supply": 25, "max_supply": 40},
-                "carnot_efficiency": 0.45, "max_supply_temperature": 62}},
+            {
+                "thermal_source": {
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 30,
+                        "min_supply": 25,
+                        "max_supply": 40,
+                    },
+                    "carnot_efficiency": 0.45,
+                    "max_supply_temperature": 62,
+                }
+            },
         ]
         self.optim_conf["shared_thermal_tanks"] = [
-            {"id": "buffer", "load_ids": [0], "thermal_mass": 3.0, "loss_coefficient": 0.2,
-             "start_temperature": 35.0, "min_temperatures": [30.0] * 48,
-             "max_temperatures": [60.0] * 48},
-            {"id": "pool", "load_ids": [], "thermal_mass": 100.0, "loss_coefficient": 0.6,
-             "start_temperature": 27.0, "min_temperatures": [25.0] * 48,
-             "max_temperatures": [30.0] * 48, "desired_temperatures": [27.0] * 48,
-             "penalty_factor": 5},
+            {
+                "id": "buffer",
+                "load_ids": [0],
+                "thermal_mass": 3.0,
+                "loss_coefficient": 0.2,
+                "start_temperature": 35.0,
+                "min_temperatures": [30.0] * 48,
+                "max_temperatures": [60.0] * 48,
+            },
+            {
+                "id": "pool",
+                "load_ids": [],
+                "thermal_mass": 100.0,
+                "loss_coefficient": 0.6,
+                "start_temperature": 27.0,
+                "min_temperatures": [25.0] * 48,
+                "max_temperatures": [30.0] * 48,
+                "desired_temperatures": [27.0] * 48,
+                "penalty_factor": 5,
+            },
         ]
         self.optim_conf["tank_transfers"] = [
-            {"from": "buffer", "to": "pool", "transfer_coefficient": 2.0,
-             "max_transfer_power": 20000},
+            {
+                "from": "buffer",
+                "to": "pool",
+                "transfer_coefficient": 2.0,
+                "max_transfer_power": 20000,
+            },
         ]
         self.optim_conf["cop_solver"] = "auto"
         opt = self.create_optimization()
         cheap_then_dear = np.array([0.05] * 24 + [0.40] * 24)
         res = opt.perform_optimization(
-            self.df_input_data_dayahead, self.p_pv_forecast.values.ravel(),
-            self.p_load_forecast.values.ravel(), cheap_then_dear, np.full(48, 0.02),
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            cheap_then_dear,
+            np.full(48, 0.02),
         )
         self.assertIn("Optimal", str(res["optim_status"].iloc[0]))
         buf = next((e for e in opt._dp_tank_entries if e["tank_id"] == "buffer"), None)
@@ -4379,9 +4434,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(temp.iloc[0], start, places=1)
         # Early on the tank is still recovering - it was NOT forced to the
         # configured floor instantly (which would have been infeasible).
-        self.assertLess(
-            temp.iloc[2], floor, "Tank must recover gradually, not jump to the floor"
-        )
+        self.assertLess(temp.iloc[2], floor, "Tank must recover gradually, not jump to the floor")
         # rate = min(0.5, 10/6) = 0.5 C/step -> window = ceil(10/0.5) = 20 steps; once
         # it closes the configured floor is fully in force for the rest of the horizon.
         window = 20
