@@ -232,6 +232,160 @@ curl -i -H "Content-Type: application/json" -X POST -d '{
 }' http://localhost:5000/action/naive-mpc-optim
 ```
 
+## Thermal storage and heat pumps
+
+EMHASS optimizes heat alongside electricity. A thermal store - a hot-water tank, a
+space-heating buffer, a pool, or the thermal mass of the house - is modelled as a
+**temperature state** the optimizer steers through the horizon, the thermal
+equivalent of a battery's state of charge. This section describes how those stores
+enter the linear program, how non-electric sources are priced, and how the
+temperature-dependent COP of a heat pump - which breaks linearity - is handled by a
+dynamic-programming refinement.
+
+For the user-facing configuration of these features see the
+[Thermal Integration](section_thermal.md) section.
+
+### Thermal store dynamics
+
+Each store carries a temperature $T[i]$ that evolves by a first-order energy
+balance:
+
+$$
+T[i+1] = T[i] + \frac{\Delta_t}{C}\Big(Q_{in}[i] + Q_{xfer}[i] - D[i] - L[i]\Big)
+$$
+
+where $C$ is the store's heat capacity in kWh/K (from a water `volume` or a
+building `thermal_mass`), $Q_{in}$ is the heat delivered by its sources, $Q_{xfer}$
+the net heat exchanged with other stores, $D$ the demand drawn from it (hot-water
+draw-off and/or building heat loss), and $L$ the standing loss. The loss is either a
+flat hot-water standing loss or, for a building zone, a **state-dependent** term
+$L[i] = UA\,(T[i]-T_{out}[i])\,\Delta_t$ - so a warmer zone loses faster, which is
+what lets the optimizer pre-heat the mass on cheap power and coast through a peak.
+
+The heat a source contributes depends on its type. An electric resistive element
+delivers $Q = \eta\,P_{elec}$; a gas or oil boiler delivers $Q = \eta\,P_{input}$; a
+heat pump delivers $Q = \text{COP}\cdot P_{elec}$.
+
+**Comfort bounds.** Each store has hard per-step minimum and maximum temperatures,
+and an optional soft `desired_temperature` band whose shortfall is priced as a
+penalty (so the optimizer pulls toward comfort when it is cheap, without rendering
+the problem infeasible when it is not). Index 0 is pinned to the live measured
+temperature, so every re-plan starts from the real sensor value.
+
+**Start-temperature recovery.** If the live temperature starts *below* the hard
+floor (a momentary out-of-band reading on a cold morning), demanding the full floor
+from the next step would be infeasible - a high-mass store cannot jump back into
+band in one step. EMHASS instead ramps the floor up from the measured start at a
+conservative rate, so the store is only required to recover at a feasible pace; the
+configured floor reapplies in full once it has caught up.
+
+**Tank-to-tank transfers.** A store can feed another through an emitter conductance
+(for example a buffer supplying a room or a pool). The transferred heat
+$Q_{xfer}=k\,(T_{from}-T_{to})$ is bounded by a maximum delivered power, and leaves
+the source store while entering the sink store in the same balance.
+
+### Non-electric sources and the capacity tariff
+
+A gas boiler, oil burner, or district-heat source produces heat without drawing
+electricity. Such a source is flagged `is_electric_load = False`: its power is kept
+**out of the electrical power balance** $P_{defSum}$, so firing the boiler creates no
+phantom grid draw, and it is priced directly at its own commodity tariff (via its
+`cost_track`) rather than the retail electricity price:
+
+$$
+\text{cost}_{k} = \sum_i \Delta_t \cdot c_k[i]\cdot P_{k}[i] \qquad (\text{non-electric load } k)
+$$
+
+For an electric load the per-load cost is instead applied as an *adjustment*
+$\big(c_k[i]-unit_{LoadCost}[i]\big)P_k[i]$ on top of the shared tariff, so a load
+with its own price ends up charged at exactly that price. Because non-electric
+sources never enter the grid-import term, they are also **excluded from the
+capacity (peak-power) tariff** - only electrical import counts toward the billed
+peak.
+
+### The temperature-dependent COP and why it is non-convex
+
+A heat pump's coefficient of performance falls as it has to push the store hotter.
+EMHASS uses a Carnot-fraction model:
+
+$$
+\text{COP}(T) = \eta_{Carnot}\cdot\frac{T_{supply}+273.15}{T_{supply}-T_{out}},
+\qquad T_{supply}=T+\delta_{approach}
+$$
+
+clipped to a physical range (default $[1, 8]$), where $\delta_{approach}$ is the
+heat-exchanger approach between the store and the condenser. The delivered heat is
+then
+
+$$
+Q = \text{COP}(T)\cdot P_{elec}
+$$
+
+a **bilinear product** of the (chosen) temperature and the electric power - a
+non-convex coupling a single linear program cannot represent. The MILP therefore
+plans against a COP *linearized at an assumed temperature*. That is fine as long as
+the store ends up near that temperature, but if super-heating is profitable - for
+instance to bank surplus PV into the buffer - the MILP would happily super-heat at
+the optimistic assumed COP, even though the real condenser must run hotter and the
+true COP is lower.
+
+### Dynamic-programming COP refinement
+
+To recover the true optimum without abandoning the fast LP, EMHASS adds a post-solve
+**dynamic-programming (DP) refinement**:
+
+1. **Consistency check (auto-trigger).** For each heat-pump store, compare the COP
+   the solve *used* against $\text{COP}(T)$ evaluated at the temperature the solve
+   actually *reached*. If they agree within a tolerance the plan is already
+   self-consistent and nothing happens - the DP is a no-op exactly when it is not
+   needed. It engages only when the discrepancy exceeds the tolerance.
+2. **Exact DP.** When engaged, EMHASS discretizes the store temperature into a grid
+   and solves the store's trajectory by backward induction, evaluating the *true*
+   COP at every state. Dynamic programming handles the non-convexity directly: no
+   linearization, and a single backward pass yields the globally optimal temperature
+   schedule and heat-pump/backup dispatch.
+3. **Coupled store.** A buffer that feeds a larger banking store (such as a pool)
+   can be refined *jointly* - a second state in the DP - so the decision to
+   super-heat accounts for what the coupled store can absorb. The coupled grid is
+   bounded to keep the state space tractable.
+4. **Re-solve.** The DP's COP, and a ceiling at the DP-optimal peak temperature, are
+   fed back as a corrected parameter and an extra constraint, and the LP is solved
+   once more. The ceiling prevents the re-solve from exploiting the now-fixed
+   favourable COP by super-heating past the true optimum.
+
+If the refinement fails for any reason it degrades safely to the original LP plan.
+
+**Marginal price - super-heating into PV.** The DP is driven not by the raw import
+tariff but by the **marginal** cost of running the heat pump at each step. Where the
+system is importing, that is the import tariff; where PV is in surplus and the system
+is exporting, running the heat pump instead *forgoes the export revenue*, so its true
+marginal cost is the (lower) export price:
+
+$$
+p_{marg}[i] = \begin{cases}
+prod_{SellPrice}[i] & \text{if exporting (PV surplus)}\\
+unit_{LoadCost}[i] & \text{otherwise}
+\end{cases}
+$$
+
+Feeding this to the DP is what makes it super-heat the store into otherwise-exported
+solar rather than only chasing the cheapest tariff hour.
+
+**Per-step COP.** The COP grid the DP optimizes against is two-dimensional,
+$\text{COP}[i, T]$, indexed by both the timestep and the store temperature, so the
+intraday swing in outdoor temperature - a cold dawn, a mild PV-rich midday - is
+reflected in the true COP at each hour instead of being averaged away.
+
+### The `cop_solver` setting
+
+The refinement is controlled by two `optim_conf` options:
+
+- `cop_solver` (`auto` | `dp` | `static`): `auto` runs the consistency check and
+  engages the DP only when the static COP is inconsistent (the default); `dp` always
+  runs it; `static` disables it and keeps the pure-LP plan.
+- `cop_solver_tolerance` (float, °C-equivalent COP error): how large a COP
+  discrepancy `auto` tolerates before engaging the DP.
+
 ## The EMHASS optimizations
 
 There are 3 different optimization types that are implemented in EMHASS.
