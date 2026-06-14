@@ -2033,11 +2033,15 @@ class Optimization:
     # ------------------------------------------------------------------
     def _add_temp_bound(self, constraints, predicted_temp, config_list, param, n, lower):
         """Per-step hard temperature bound (lower=True -> min, else max), skipping
-        index 0 (pinned by start_temperature) and any None entries. Uses a
-        cp.Parameter when given (warm-start), else the raw config values."""
+        index 0 (pinned by start_temperature) and any None/nan entries (an
+        unbounded step). Uses a cp.Parameter when given (warm-start), else the raw
+        config values."""
         if not config_list:
             return
-        valid = [i for i, v in enumerate(config_list) if v is not None and 0 < i < n]
+        valid = [
+            i for i, v in enumerate(config_list)
+            if v is not None and not np.isnan(v) and 0 < i < n
+        ]
         if not valid:
             return
         rhs = param[valid] if param is not None else np.array([config_list[i] for i in valid])
@@ -2060,7 +2064,10 @@ class Optimization:
         """Comfort-shortfall penalty toward a desired band: prices only deviation
         below desired (heat) / above (cool). Returns the summed penalty term, or
         None when there is no valid target."""
-        valid = [i for i, v in enumerate(desired_list) if v is not None and 0 < i < n]
+        valid = [
+            i for i, v in enumerate(desired_list)
+            if v is not None and not np.isnan(v) and 0 < i < n
+        ]
         if not valid:
             return None
         target = param[valid] if param is not None else np.array([desired_list[i] for i in valid])

@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from emhass.thermal_dp import ThermalDPParams, solve_thermal_dp
+from emhass.thermal_dp import MAX_COUPLED_STATES, ThermalDPParams, solve_thermal_dp
 
 
 def _spread_price(n=48, dt=0.5, cheap=0.05, dear=0.50, start_h=8):
@@ -83,6 +83,16 @@ def test_dp_caps_coupled_state_count():
         demand_kw=2.0,
     )
     res = solve_thermal_dp(_spread_price(), outdoor_temperature=8.0, params=params)
-    assert res.meta["coupled_states"] <= 64  # MAX_COUPLED_STATES
+    assert res.meta["coupled_states"] <= MAX_COUPLED_STATES
     assert res.solve_seconds < 10.0
     assert res.coupled_trajectory is not None
+
+    # Micro-span edge case: a near-degenerate band with a tiny configured step must
+    # not blow up the count (an arange-with-epsilon would have produced thousands).
+    micro = ThermalDPParams(
+        coupled_heat_capacity=100.0,
+        coupled_min_temp=26.0, coupled_max_temp=26.00000001,
+        coupled_grid_step=1e-9, demand_kw=1.0,
+    )
+    res_micro = solve_thermal_dp(np.full(6, 0.2), outdoor_temperature=8.0, params=micro)
+    assert res_micro.meta["coupled_states"] <= MAX_COUPLED_STATES
