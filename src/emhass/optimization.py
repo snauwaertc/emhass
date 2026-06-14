@@ -2844,7 +2844,7 @@ class Optimization:
 
         # Per-source COP arrays (HP uses Carnot, gas / oil / district use flat
         # efficiency). Resolve each source's conversion factor from its config.
-        cop_arrays: list[np.ndarray] = []
+        cop_arrays: list = []
         # Optional per-source temperature ceiling (e.g. a heat pump capped at its
         # supply temperature). None = no cap (e.g. an electric booster).
         source_caps: list[float | None] = []
@@ -2854,12 +2854,43 @@ class Optimization:
         # overshoot_temperature, matching the compiler's storage-level field.
         source_overshoots: list[float | None] = []
         tank_overshoot = tank.get("overshoot_temperature")
+        # The heat pump - the source whose COP depends on the achieved tank
+        # temperature - is held as a cp.Parameter so the post-solve DP refinement
+        # (see _refine_cop_with_dp) can correct it to the value consistent with the
+        # globally-optimal temperature and re-solve, without the limit-cycling of
+        # the old COP fixed-point. Other sources (flat-efficiency gas/oil/district)
+        # stay constant numpy arrays.
+        dp_hp_info = None
         for k in load_ids:
             src_cfg = self._get_load_source_config(k)
-            cops = utils.resolve_thermal_battery_cop(
-                src_cfg, outdoor_temp_arr.tolist(), length=required_len
+            cops = np.asarray(
+                utils.resolve_thermal_battery_cop(
+                    src_cfg, outdoor_temp_arr.tolist(), length=required_len
+                )
             )
-            cop_arrays.append(np.asarray(cops))
+            # Only a HEATING-CURVE heat pump is DP-refinable: its supply (hence COP)
+            # tracks the achieved tank temperature, so driving the tank above the curve
+            # makes the static COP optimistic. A fixed supply_temperature source is
+            # physically capped at its supply - its COP is constant by design and the
+            # static value is already exact - so it is left as a constant array.
+            is_hp = src_cfg.get("efficiency") is None and bool(src_cfg.get("heating_curve"))
+            if is_hp and dp_hp_info is None:
+                cop_param = cp.Parameter(
+                    required_len, nonneg=True, value=cops, name=f"cop_{tank_id}_{k}"
+                )
+                cop_arrays.append(cop_param)
+                dp_hp_info = {
+                    "load_idx": k,
+                    "cop_param": cop_param,
+                    "cop_static": cops,
+                    "carnot": float(src_cfg.get("carnot_efficiency", 0.4)),
+                    "approach": float(self.optim_conf.get("cop_hx_approach", 5.0)),
+                    "nominal_power": float(src_cfg.get("nominal_power", 0.0)) or float(
+                        max(np.atleast_1d(self.optim_conf["nominal_power_of_deferrable_loads"][k]))
+                    ),
+                }
+            else:
+                cop_arrays.append(cops)
             # scalar, per-step list, or None (uncapped)
             source_caps.append(src_cfg.get("max_supply_temperature"))
             source_overshoots.append(src_cfg.get("overshoot_temperature", tank_overshoot))
@@ -3061,7 +3092,136 @@ class Optimization:
                 required_len,
             )
 
+        # Register a heat-pump tank for the post-solve DP COP refinement. We capture
+        # the handles needed to (a) test COP consistency after the solve and (b) run
+        # the buffer DP on the tank's realised demand. Constant-efficiency-only tanks
+        # (no heat pump) are never registered - the static COP is already exact there.
+        if dp_hp_info is not None and self.optim_conf.get("cop_solver", "auto") != "static":
+            if not hasattr(self, "_dp_tank_entries"):
+                self._dp_tank_entries = []
+            backup = None
+            for k in load_ids:
+                if k == dp_hp_info["load_idx"]:
+                    continue
+                bcfg = self._get_load_source_config(k)
+                if bcfg.get("efficiency") is not None:  # a flat-efficiency backup (gas/oil)
+                    bnom = max(np.atleast_1d(self.optim_conf["nominal_power_of_deferrable_loads"][k]))
+                    backup = {"load_idx": k, "efficiency": float(bcfg["efficiency"]),
+                              "nominal_power": float(bnom)}
+                    break
+            self._dp_tank_entries.append({
+                "tank_id": tank_id,
+                "predicted_temp": predicted_temp,
+                "conversion": float(conversion),
+                "heating_demand": np.asarray(heating_demand, dtype=float),
+                "xfer_net": xfer_net,  # cvxpy expr or zeros, length required_len-1
+                "loss_coefficient": loss_coefficient,
+                "thermal_losses": (None if loss_coefficient is not None
+                                   else np.asarray(thermal_losses, dtype=float)),
+                "outdoor": np.asarray(outdoor_temp_arr, dtype=float),
+                "start_temperature": float(start_temperature),
+                "min_temp": min((v for v in min_temperatures_list if v is not None), default=20.0),
+                "max_temp": max((v for v in max_temperatures_list if v is not None), default=65.0),
+                "hp": dp_hp_info,
+                "backup": backup,
+            })
+
         return predicted_temp, heating_demand, penalty_term
+
+    def _refine_cop_with_dp(self, selected_solver, solver_opts):
+        """Post-solve COP refinement via the buffer DP - the replacement for the
+        old COP fixed-point.
+
+        For each registered heat-pump tank, test whether the COP the solve used
+        matches COP(achieved tank temperature). If it does, the static solve is
+        already self-consistent and nothing happens (the DP never runs - this is the
+        automatic skip when it is not needed). If it does not, the temperature
+        decision was made on a wrong COP: run the exact buffer DP on the tank's
+        realised demand to find the globally-optimal temperature trajectory, correct
+        the COP parameter to the value consistent with that optimum, cap the tank to
+        the DP optimum (so the re-solve cannot exploit the now-fixed favourable COP by
+        super-heating past it), and re-solve once. Unlike the fixed-point, the DP is
+        exact in a single pass, so this does not limit-cycle.
+        """
+        entries = getattr(self, "_dp_tank_entries", [])
+        mode = self.optim_conf.get("cop_solver", "auto")
+        if not entries or mode == "static" or self.prob is None or self.prob.value is None:
+            return
+        from emhass.thermal_dp import ThermalDPParams, solve_buffer_pool_dp
+        tol = float(self.optim_conf.get("cop_solver_tolerance", 0.5))
+        dt = self.time_step
+        n = self.num_timesteps
+        price = np.asarray(self.param_load_cost.value, dtype=float)
+        extra_constraints = []
+        refined = False
+        for e in entries:
+            temp = e["predicted_temp"].value
+            if temp is None:
+                continue
+            hp = e["hp"]
+            cop_now = np.asarray(hp["cop_param"].value, dtype=float)
+            cop_consistent = utils.cop_from_tank_temperature(
+                temp[:n], hp["carnot"], e["outdoor"], approach=hp["approach"]
+            )
+            max_err = float(np.max(np.abs(cop_now - cop_consistent)))
+            if mode == "auto" and max_err <= tol:
+                continue  # static solve already self-consistent: DP not needed here
+            # External demand (kW) the buffer must supply: draw-off + net outflow.
+            # Standing loss is left to the DP so it captures the loss-vs-temperature
+            # trade-off that drives the super-heating decision.
+            xfer = e["xfer_net"]
+            xfer_val = np.asarray(getattr(xfer, "value", xfer), dtype=float)
+            ext = e["heating_demand"][:n].astype(float).copy()
+            ext[: len(xfer_val)] -= xfer_val  # xfer_net = inflow - outflow
+            demand_kw = np.maximum(ext, 0.0) / dt
+            outdoor_ref = float(np.mean(e["outdoor"]))
+            backup = e["backup"]
+            backup_price = 1e6
+            if backup is not None and getattr(self, "param_cost_per_load", None):
+                idx = backup["load_idx"]
+                if idx < len(self.param_cost_per_load) and self.param_cost_per_load[idx].value is not None:
+                    backup_price = float(np.mean(self.param_cost_per_load[idx].value))
+            params = ThermalDPParams(
+                buffer_heat_capacity=1.0 / e["conversion"],
+                buffer_loss_coeff=(e["loss_coefficient"] or 0.0),
+                buffer_min_temp=e["min_temp"],
+                buffer_max_temp=e["max_temp"],
+                carnot_efficiency=hp["carnot"],
+                hx_approach=hp["approach"],
+                hp_max_power=hp["nominal_power"] / 1000.0,
+                backup_efficiency=(backup["efficiency"] if backup else 0.95),
+                backup_max_power=(backup["nominal_power"] / 1000.0 if backup else 0.0),
+                backup_price=backup_price,
+                house_demand_kw=demand_kw,
+                indoor_ambient=outdoor_ref,  # EMHASS tanks lose to outdoor
+            )
+            res = solve_buffer_pool_dp(
+                price, outdoor_ref, params, time_step=dt, buffer_start=e["start_temperature"]
+            )
+            dp_temp = np.asarray(res.buffer_trajectory[:n], dtype=float)
+            hp["cop_param"].value = utils.cop_from_tank_temperature(
+                dp_temp, hp["carnot"], e["outdoor"], approach=hp["approach"]
+            )
+            extra_constraints.append(e["predicted_temp"] <= float(dp_temp.max()) + 1.0)
+            refined = True
+            self.logger.info(
+                "DP COP refinement on tank '%s': COP inconsistency %.2f > %.2f - "
+                "re-optimised buffer to peak %.0f C, gas %.1f kWh",
+                e["tank_id"], max_err, tol, dp_temp.max(),
+                float(np.sum(res.backup_input_per_step) * dt),
+            )
+        if not refined:
+            return
+        prob2 = cp.Problem(self.prob.objective, self.prob.constraints + extra_constraints)
+        try:
+            prob2.solve(solver=selected_solver, warm_start=True, **solver_opts)
+            if prob2.value is not None and str(prob2.status).lower() not in ("infeasible", "unbounded"):
+                self.prob = prob2
+            else:
+                self.logger.warning("DP COP refinement re-solve status %s; keeping static solve",
+                                    prob2.status)
+        except Exception as exc:
+            self.logger.warning("DP COP refinement re-solve failed (%s); keeping static solve", exc)
 
     def _add_deferrable_load_constraints(
         self,
@@ -3605,6 +3765,7 @@ class Optimization:
         # shared tank is fed by N >= 0 deferrable loads and/or tank->tank transfers.
         n_loads = self.optim_conf["number_of_deferrable_loads"]
         tank_temp_by_id = {}
+        self._dp_tank_entries = []  # reset the DP COP-refinement registry for this build
         for tank_idx, tank in enumerate(self._get_shared_thermal_tanks()):
             shared_pred_temp, shared_demand, shared_penalty = (
                 self._add_shared_thermal_tank_constraints(
@@ -4861,6 +5022,14 @@ class Optimization:
             self.logger.warning(
                 f"Solver {selected_solver} failed: {e}. Checking status for fallback..."
             )
+
+        # DP COP refinement: replaces the COP fixed-point. Self-triggering - corrects
+        # and re-solves only the heat-pump tanks whose COP the static solve got wrong;
+        # a no-op when every tank is already self-consistent or when cop_solver=static.
+        try:
+            self._refine_cop_with_dp(selected_solver, solver_opts)
+        except Exception as exc:
+            self.logger.warning("DP COP refinement skipped (%s)", exc)
 
         # Check for failure or "bad" status
         # Note: "user_limit" often means timeout. "infeasible" means configuration conflict.
