@@ -32,6 +32,14 @@ import numpy as np
 # the state count stays bounded; the band itself is preserved.
 MAX_COUPLED_STATES = 64
 
+# Upper bound on the number of discretized temperature states for the heat-pump
+# store itself. grid_step is user-configurable, so a fine step on a wide band (e.g.
+# 0.1 C over 25-65 C -> 401 states) would make the backward induction slow and, past
+# ~32767 states, overflow the int16 policy array into a silently wrong plan. When the
+# band would exceed this, the step is coarsened so the count stays bounded; the band
+# is preserved. The default 0.5 C step stays well under the cap (unchanged behaviour).
+MAX_TANK_STATES = 200
+
 
 @dataclass
 class ThermalDPParams:
@@ -134,7 +142,15 @@ def solve_thermal_dp(
     demand = p.demand_kw if np.ndim(p.demand_kw) else np.full(N, float(p.demand_kw))
     demand = np.broadcast_to(demand, (N,))
 
-    grid = np.arange(p.min_temp, p.max_temp + 1e-6, p.grid_step)
+    span_t = p.max_temp - p.min_temp
+    if span_t > 0:
+        # Resolution from grid_step, hard-capped at MAX_TANK_STATES (bounds runtime and
+        # keeps nt < int16 so the policy array cannot overflow). linspace for an exact
+        # count; the default 0.5 C step lands below the cap, leaving the grid unchanged.
+        nt = min(MAX_TANK_STATES, max(2, int(round(span_t / p.grid_step)) + 1))
+        grid = np.linspace(p.min_temp, p.max_temp, nt)
+    else:
+        grid = np.array([p.min_temp])
     nt = len(grid)
     # Per-step COP grid: cop2d[t, j] is the COP charging the store to grid[j] under
     # the outdoor temperature at step t. A 2D grid keeps the backward induction exact
@@ -214,6 +230,10 @@ def solve_thermal_dp(
     # Forward rollout from the start state.
     it = int(np.argmin(np.abs(grid - tank_start)))
     ic = int(np.argmin(np.abs(cgrid - coupled_start))) if use_coupled else 0
+    # V now holds the optimal cost-to-go at t=0. If the start state is INF, no feasible
+    # policy exists (e.g. demand exceeds what the heat pump and backup can deliver every
+    # step): flag it rather than returning a plausible-looking but energy-violating plan.
+    start_infeasible = bool(V[it, ic] >= INF * 0.5)
     traj = [grid[it]]
     ctraj = [cgrid[ic]] if use_coupled else None
     hp_draw = np.zeros(N)
@@ -245,7 +265,12 @@ def solve_thermal_dp(
         coupled_trajectory=np.array(ctraj) if use_coupled else None,
         hp_electric_per_step=hp_draw,
         backup_input_per_step=bk_draw,
-        total_cost=float(cost),
+        total_cost=float("inf") if start_infeasible else float(cost),
         solve_seconds=time.time() - t0,
-        meta={"tank_states": nt, "coupled_states": ncl, "horizon": N},
+        meta={
+            "tank_states": nt,
+            "coupled_states": ncl,
+            "horizon": N,
+            "infeasible": start_infeasible,
+        },
     )
