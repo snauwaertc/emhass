@@ -3200,6 +3200,10 @@ class Optimization:
             price = np.where(p_exp > 1.0, export_price, tariff)
         except Exception:
             price = tariff
+        self.logger.info(
+            "DP COP solver (mode=%s): eligible heating-curve heat-pump tanks %s",
+            mode, [e.get("tank_id") for e in entries],
+        )
         extra_constraints = []
         refined = False
         for e in entries:
@@ -3213,6 +3217,10 @@ class Optimization:
             )
             max_err = float(np.max(np.abs(cop_now - cop_consistent)))
             if mode == "auto" and max_err <= tol:
+                self.logger.info(
+                    "DP COP solver: tank '%s' COP already consistent (err %.2f <= %.2f) - skipped",
+                    e["tank_id"], max_err, tol,
+                )
                 continue  # static solve already self-consistent: DP not needed here
             # External demand (kW) the buffer must supply: draw-off + net outflow.
             # Standing loss is left to the DP so it captures the loss-vs-temperature
