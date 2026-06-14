@@ -146,12 +146,15 @@ def solve_thermal_dp(
     use_coupled = p.coupled_heat_capacity is not None
     if use_coupled:
         span = p.coupled_max_temp - p.coupled_min_temp
-        cstep = p.coupled_grid_step
         if span > 0:
-            # arange(min, max, step) yields floor(span/step)+1 points, so dividing by
-            # (MAX - 1) keeps the count at or below MAX.
-            cstep = max(cstep, span / (MAX_COUPLED_STATES - 1))
-        cgrid = np.arange(p.coupled_min_temp, p.coupled_max_temp + 1e-6, cstep)
+            # Resolution from the configured step, but hard-capped at MAX_COUPLED_STATES.
+            # linspace (not arange) so the count is exact - arange's float endpoint fudge
+            # could otherwise blow the count up on a tiny span.
+            npts = min(MAX_COUPLED_STATES,
+                       max(2, int(round(span / p.coupled_grid_step)) + 1))
+            cgrid = np.linspace(p.coupled_min_temp, p.coupled_max_temp, npts)
+        else:
+            cgrid = np.array([p.coupled_min_temp])
         ncl = len(cgrid)
         closs = p.coupled_loss_coeff * (cgrid - outdoor_ref) * dt
         qxf_levels = np.linspace(0.0, p.coupling_max_power * dt, p.coupling_levels)
