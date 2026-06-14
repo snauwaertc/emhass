@@ -4687,6 +4687,25 @@ class Optimization:
 
         return predicted_temp, heating_demand, penalty_term
 
+    @staticmethod
+    def _dp_marginal_price(tariff, p_grid_neg, export_price):
+        """Marginal cost of heat-pump electricity per step for the DP.
+
+        Where the system imports, the heat pump's marginal cost is the import
+        ``tariff``. Where PV is in surplus, running the heat pump instead forgoes the
+        export revenue, so its true marginal cost is the (lower) ``export_price``.
+        Feeding this to the DP makes it super-heat into free solar rather than just
+        the cheapest tariff hour.
+
+        ``p_grid_neg`` is the export power, non-positive by convention
+        (``cp.Variable(nonpos=True)``): a surplus shows up as ``p_grid_neg < 0``. The
+        ``< -1.0`` threshold (W) ignores numerically negligible export.
+        """
+        tariff = np.asarray(tariff, dtype=float)
+        p_exp = np.asarray(p_grid_neg, dtype=float)
+        export_price = np.asarray(export_price, dtype=float)
+        return np.where(p_exp < -1.0, export_price, tariff)
+
     def _refine_cop_with_dp(self, selected_solver, solver_opts):
         """Post-solve COP refinement via the thermal DP.
 
@@ -4715,9 +4734,11 @@ class Optimization:
         # first solve's grid position; the re-solve then places the load against PV.
         tariff = np.asarray(self.param_load_cost.value, dtype=float)[:n]
         try:
-            p_exp = np.asarray(self.vars["p_grid_neg"].value, dtype=float)[:n]
-            export_price = np.asarray(self.param_prod_price.value, dtype=float)[:n]
-            price = np.where(p_exp > 1.0, export_price, tariff)
+            price = self._dp_marginal_price(
+                tariff,
+                np.asarray(self.vars["p_grid_neg"].value, dtype=float)[:n],
+                np.asarray(self.param_prod_price.value, dtype=float)[:n],
+            )
         except Exception:
             price = tariff
         self.logger.info(
@@ -4758,7 +4779,8 @@ class Optimization:
                 m = min(len(xfer_val), len(pool_xfer))
                 ext[:m] -= pool_xfer[:m]
             demand_kw = np.maximum(ext, 0.0) / dt
-            outdoor_ref = float(np.mean(e["outdoor"]))
+            outdoor_arr = np.asarray(e["outdoor"], dtype=float)[:n]
+            outdoor_ref = float(np.mean(outdoor_arr))
             backup = e["backup"]
             backup_price = 1e6
             if backup is not None and getattr(self, "param_cost_per_load", None):
@@ -4791,7 +4813,7 @@ class Optimization:
                 **coupled_kwargs,
             )
             res = solve_thermal_dp(
-                price, outdoor_ref, params, time_step=dt, tank_start=e["start_temperature"],
+                price, outdoor_arr, params, time_step=dt, tank_start=e["start_temperature"],
                 coupled_start=(coupled["start_temperature"] if coupled else 26.5),
             )
             dp_temp = np.asarray(res.tank_trajectory[:n], dtype=float)

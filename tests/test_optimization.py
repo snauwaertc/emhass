@@ -13447,9 +13447,11 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(temp.iloc[0], start, places=1)
         # Early on the tank is still recovering - it was NOT forced to the
         # configured floor instantly (which would have been infeasible).
-        self.assertLess(temp.iloc[2], floor, "Tank must recover gradually, not jump to the floor")
-        # window = max(6, ceil((45-35)/0.5)) = 20 steps; once it closes the
-        # configured floor is fully in force for the rest of the horizon.
+        self.assertLess(
+            temp.iloc[2], floor, "Tank must recover gradually, not jump to the floor"
+        )
+        # rate = min(0.5, 10/6) = 0.5 C/step -> window = ceil(10/0.5) = 20 steps; once
+        # it closes the configured floor is fully in force for the rest of the horizon.
         window = 20
         self.assertGreaterEqual(
             temp.iloc[window:].min(),
@@ -13690,6 +13692,21 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(buf)
         self.assertIsNotNone(buf["coupled"], "pool should be detected as the coupled store")
         self.assertGreater(buf["coupled"]["heat_capacity"], 50)
+
+    def test_dp_marginal_price_uses_export_price_on_pv_surplus(self):
+        """The DP marginal price must drop to the export price where PV is in surplus.
+        p_grid_neg is non-positive (export shows as < 0), so the surplus test is
+        `p_grid_neg < -1 W`. A sign slip here silently makes the super-heat-into-PV
+        feature dead code (the DP would never see the cheaper marginal cost)."""
+        tariff = np.array([0.40, 0.40, 0.40, 0.40])
+        export = np.array([0.02, 0.02, 0.02, 0.02])
+        # importing at t0; clear export at t1; negligible export (<1 W) at t2; export t3
+        p_grid_neg = np.array([0.0, -5000.0, -0.5, -3000.0])
+        price = Optimization._dp_marginal_price(tariff, p_grid_neg, export)
+        self.assertEqual(price[0], 0.40)  # importing -> import tariff
+        self.assertEqual(price[1], 0.02)  # exporting -> foregone export price
+        self.assertEqual(price[2], 0.40)  # negligible export -> import tariff
+        self.assertEqual(price[3], 0.02)  # exporting -> foregone export price
 
 
 if __name__ == "__main__":
