@@ -56,6 +56,24 @@ CURTAILMENT_TIEBREAK_EPS = 1e-7
 # run hotter (e.g. industrial or glycol systems).
 SHARED_TANK_CAP_BIG_M_TEMP = 100.0
 
+# Minimum recovery window (in optimization steps) granted to a shared thermal
+# tank that starts below its hard minimum temperature. A momentary out-of-band
+# sensor read (e.g. a heating zone dipping below its comfort floor on a cold
+# morning) would otherwise make the problem infeasible, because a rate-limited
+# tank cannot jump back into band in a single step. Over this window the hard
+# floor is ramped from the live start temperature up to the configured minimum,
+# so the tank is only required to recover at a feasible pace. 6 steps is ~3h on
+# a 30-minute grid - long enough for a slow zone or buffer to climb a few
+# degrees; the configured minimum applies in full once the window closes.
+SHARED_TANK_START_RECOVERY_STEPS = 6
+
+# Conservative recovery rate (deg C per optimization step) used to size the
+# grace window when a tank starts further below its floor than the minimum
+# window would cover: window = max(min_steps, ceil(gap / rate)). 0.5 C/step is
+# deliberately slow so the ramp stays feasible for a rate-limited zone; a faster
+# tank simply outruns the floor and reaches band earlier on its own.
+SHARED_TANK_START_RECOVERY_RATE = 0.5
+
 
 class Optimization:
     r"""
@@ -2972,6 +2990,31 @@ class Optimization:
                     - heating_demand[L:-1]
                     - loss_vec[L:-1]
                 )
+            )
+
+        # Recovery grace: if the tank STARTS below its hard minimum (a momentary
+        # out-of-band sensor read - e.g. a zone dips below its comfort floor on a cold
+        # morning), demanding the full min from t=1 is infeasible for a rate-limited
+        # tank that cannot jump back into band in one step, and the relaxed-LP fallback
+        # cannot rescue that conflict. Instead, ramp the floor up linearly from the
+        # start value to the configured min over a short window, so the tank is required
+        # only to recover at a feasible pace. The configured min applies in full after
+        # the window; the desired-temperature penalty still pulls it up as fast as it can.
+        floor0 = next((v for v in min_temperatures_list if v is not None), None)
+        if floor0 is not None and start_temperature < floor0 - 1e-6:
+            window = max(SHARED_TANK_START_RECOVERY_STEPS,
+                         int(np.ceil((floor0 - start_temperature) / SHARED_TANK_START_RECOVERY_RATE)))
+            min_temperatures_list = list(min_temperatures_list)
+            for t in range(min(window, len(min_temperatures_list))):
+                cfg = min_temperatures_list[t]
+                if cfg is None:
+                    continue
+                ramp = start_temperature + (cfg - start_temperature) * (t / window)
+                min_temperatures_list[t] = min(cfg, ramp)
+            self.logger.info(
+                "Shared tank '%s': start %.1f C below floor %.1f C - ramping the min "
+                "back into band over %d steps to stay feasible",
+                tank_id, start_temperature, floor0, window,
             )
 
         # Hard min/max temperature bounds (shared helper; index 0 already pinned).

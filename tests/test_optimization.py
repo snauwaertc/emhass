@@ -4303,6 +4303,79 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
                 msg=f"Fresh build must start the tank at its configured {start} C, got {first_temp}",
             )
 
+    def test_shared_tank_start_below_floor_recovers_gracefully(self):
+        """A shared tank whose live start temperature is BELOW its hard minimum
+        (a momentary out-of-band sensor read - e.g. a heating zone dipping under
+        its comfort floor on a cold morning) must not make the problem
+        infeasible. A high-mass tank cannot jump 10 C back into band in one
+        30-minute step, so demanding the full floor from t=1 would be infeasible
+        and the relaxed-LP fallback cannot rescue that conflict. The recovery
+        grace ramps the floor from the live start up to the configured minimum
+        over a short window, so the tank recovers at a feasible pace; the
+        configured floor applies in full once the window closes. This preserves
+        the #970 honored-start behaviour (temp[0] equals the live value)."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
+        self.optim_conf["number_of_deferrable_loads"] = 2
+        self.optim_conf["nominal_power_of_deferrable_loads"] = [3500, 3000]
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [0, 0]
+        self.optim_conf["operating_hours_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False, False]
+        self.optim_conf["set_deferrable_load_single_constant"] = [False, False]
+        self.optim_conf["set_deferrable_startup_penalty"] = [0.0, 0.0]
+        self.optim_conf["set_deferrable_max_startups"] = [0, 0]
+        self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["def_load_config"] = [
+            {"thermal_source": {"efficiency": 3.0}},
+            {"thermal_source": {"efficiency": 1.0}},
+        ]
+        start, floor = 35.0, 45.0
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "dhw",
+                "load_ids": [0, 1],
+                "volume": 2.0,  # high mass: a 10 C one-step jump is physically impossible
+                "density": 1000,
+                "heat_capacity": 4.186,
+                "start_temperature": start,
+                "thermal_loss": 0.0,
+                "min_temperatures": [floor] * 48,
+                "max_temperatures": [65.0] * 48,
+            }
+        ]
+        opt = self.create_optimization()
+        ulc = self.df_input_data_dayahead[opt.var_load_cost].values
+        upp = self.df_input_data_dayahead[opt.var_prod_price].values
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            ulc,
+            upp,
+        )
+        # Start is 10 C below floor; the grace ramp keeps the MILP feasible
+        # (a true Optimal, not the relaxed fallback).
+        self.assertEqual(opt.optim_status, "Optimal")
+        tank_cols = [c for c in res.columns if "predicted_temp_heater" in c]
+        self.assertTrue(tank_cols, f"no tank temp column in {res.columns.tolist()}")
+        temp = res[tank_cols[0]].reset_index(drop=True)
+        # #970: the fresh build still honors the live (out-of-band) start.
+        self.assertAlmostEqual(temp.iloc[0], start, places=1)
+        # Early on the tank is still recovering - it was NOT forced to the
+        # configured floor instantly (which would have been infeasible).
+        self.assertLess(
+            temp.iloc[2], floor, "Tank must recover gradually, not jump to the floor"
+        )
+        # window = max(6, ceil((45-35)/0.5)) = 20 steps; once it closes the
+        # configured floor is fully in force for the rest of the horizon.
+        window = 20
+        self.assertGreaterEqual(
+            temp.iloc[window:].min(),
+            floor - 0.1,
+            "Configured floor must hold once the recovery window closes",
+        )
+
     async def test_full_stack_runtime_tanks_end_to_end(self):
         """Integration of the #539 stack through the runtime path: manual
         shared_thermal_tanks passed as runtime parameters (Micr0mega's flow),
