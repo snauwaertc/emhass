@@ -3531,8 +3531,8 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
 
     def test_dp_cop_refinement_curbs_over_superheating(self):
         """static mode banks the buffer hot on the fake-high COP; auto mode runs the
-        DP, prices the real COP, and super-heats less - the auto-triggered replacement
-        for the COP fixed-point, engaging exactly because the static solve is wrong."""
+        DP, prices the real COP, and super-heats less - engaging automatically exactly
+        because the static solve is COP-inconsistent."""
         _, res_static, temp_static = self._dp_refine_scenario("static")
         opt_auto, res_auto, temp_auto = self._dp_refine_scenario("auto")
         self.assertIn("Optimal", str(res_static["optim_status"].iloc[0]))
