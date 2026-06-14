@@ -858,7 +858,13 @@ def compile_heat_topology(topology: dict) -> dict:
         #   loss_coefficient (kW/K)  - state-dependent loss UA*(T-outdoor)
         #   thermal_inertia  (h)     - lag between heat input and temperature
         #   window_area (m2) + shgc - solar gain through glazing (offsets heating)
-        for _zone_key in ("thermal_mass", "loss_coefficient", "thermal_inertia", "window_area", "shgc"):
+        for _zone_key in (
+            "thermal_mass",
+            "loss_coefficient",
+            "thermal_inertia",
+            "window_area",
+            "shgc",
+        ):
             if s.get(_zone_key) is not None:
                 tank[_zone_key] = float(s[_zone_key])
         demand = storage_demand.get(sid, {})

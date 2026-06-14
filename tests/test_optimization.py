@@ -3481,7 +3481,12 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0]
         self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0]
         self.optim_conf["def_load_config"] = [
-            {"thermal_source": {"supply_temperature": supply_temperature, "carnot_efficiency": 0.45}},
+            {
+                "thermal_source": {
+                    "supply_temperature": supply_temperature,
+                    "carnot_efficiency": 0.45,
+                }
+            },
         ]
 
     def test_shared_tank_building_zone_state_dependent_loss(self):
@@ -3605,9 +3610,15 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             self.df_input_data_dayahead["ghi"] = ghi
             self._setup_single_hp(supply_temperature=40.0)
             tank = {
-                "id": "house", "load_ids": [0], "thermal_mass": 8.0, "loss_coefficient": 0.4,
-                "start_temperature": 20.0, "min_temperatures": [19.5] * 48,
-                "max_temperatures": [24.0] * 48, "desired_temperatures": [20.5] * 48, "penalty_factor": 5,
+                "id": "house",
+                "load_ids": [0],
+                "thermal_mass": 8.0,
+                "loss_coefficient": 0.4,
+                "start_temperature": 20.0,
+                "min_temperatures": [19.5] * 48,
+                "max_temperatures": [24.0] * 48,
+                "desired_temperatures": [20.5] * 48,
+                "penalty_factor": 5,
             }
             if window_area:
                 tank["window_area"] = window_area
@@ -3624,7 +3635,8 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             return res["P_deferrable0"].sum()
 
         self.assertLess(
-            heating_energy(25), heating_energy(0),
+            heating_energy(25),
+            heating_energy(0),
             "window solar should reduce the heating the zone needs on a sunny day",
         )
 
@@ -3650,14 +3662,34 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             {"thermal_source": {"efficiency": 0.95}},
         ]
         self.optim_conf["shared_thermal_tanks"] = [
-            {"id": "buffer", "load_ids": [0, 1], "volume": 0.1, "start_temperature": 40.0,
-             "thermal_loss": 0.05, "min_temperatures": [25.0] * 48, "max_temperatures": [45.0] * 48},
-            {"id": "house", "load_ids": [], "thermal_mass": 18.0, "loss_coefficient": 0.5,
-             "start_temperature": 20.5, "min_temperatures": [19.5] * 48,
-             "max_temperatures": [21.5] * 48, "desired_temperatures": [20.5] * 48, "penalty_factor": 30},
+            {
+                "id": "buffer",
+                "load_ids": [0, 1],
+                "volume": 0.1,
+                "start_temperature": 40.0,
+                "thermal_loss": 0.05,
+                "min_temperatures": [25.0] * 48,
+                "max_temperatures": [45.0] * 48,
+            },
+            {
+                "id": "house",
+                "load_ids": [],
+                "thermal_mass": 18.0,
+                "loss_coefficient": 0.5,
+                "start_temperature": 20.5,
+                "min_temperatures": [19.5] * 48,
+                "max_temperatures": [21.5] * 48,
+                "desired_temperatures": [20.5] * 48,
+                "penalty_factor": 30,
+            },
         ]
         self.optim_conf["tank_transfers"] = [
-            {"from": "buffer", "to": "house", "transfer_coefficient": 0.7, "max_transfer_power": 12000}
+            {
+                "from": "buffer",
+                "to": "house",
+                "transfer_coefficient": 0.7,
+                "max_transfer_power": 12000,
+            }
         ]
         opt = self.create_optimization()
         res = opt.perform_optimization(
@@ -3673,8 +3705,12 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         buffer = res[max(tcols, key=lambda c: res[c].mean())].to_numpy()
         self.assertGreaterEqual(house.min(), 19.5 - 0.3, "room must be held in band via the buffer")
         self.assertLessEqual(house.max(), 21.5 + 0.3)
-        self.assertGreater(buffer.mean(), house.mean() + 5, "buffer should run much hotter than the room")
-        self.assertTrue((buffer >= house - 0.1).all(), "transfer must respect the temperature gradient")
+        self.assertGreater(
+            buffer.mean(), house.mean() + 5, "buffer should run much hotter than the room"
+        )
+        self.assertTrue(
+            (buffer >= house - 0.1).all(), "transfer must respect the temperature gradient"
+        )
 
     def test_tank_to_tank_transfer_feasible_when_receiver_hotter(self):
         """Regression: a tank->tank transfer must stay feasible when the receiving
@@ -3686,15 +3722,34 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.df_input_data_dayahead["outdoor_temperature_forecast"] = [20.0] * 48
         self._setup_single_hp(supply_temperature=45.0, nominal=4000)
         self.optim_conf["shared_thermal_tanks"] = [
-            {"id": "buffer", "load_ids": [0], "volume": 0.1, "start_temperature": 26.0,
-             "thermal_loss": 0.05, "min_temperatures": [20.0] * 48, "max_temperatures": [60.0] * 48},
-            {"id": "pool", "load_ids": [], "thermal_mass": 100.0, "loss_coefficient": 0.5,
-             "start_temperature": 28.0, "min_temperatures": [15.0] * 48,
-             "max_temperatures": [30.0] * 48, "desired_temperatures": [27.0] * 48,
-             "penalty_factor": 5},
+            {
+                "id": "buffer",
+                "load_ids": [0],
+                "volume": 0.1,
+                "start_temperature": 26.0,
+                "thermal_loss": 0.05,
+                "min_temperatures": [20.0] * 48,
+                "max_temperatures": [60.0] * 48,
+            },
+            {
+                "id": "pool",
+                "load_ids": [],
+                "thermal_mass": 100.0,
+                "loss_coefficient": 0.5,
+                "start_temperature": 28.0,
+                "min_temperatures": [15.0] * 48,
+                "max_temperatures": [30.0] * 48,
+                "desired_temperatures": [27.0] * 48,
+                "penalty_factor": 5,
+            },
         ]
         self.optim_conf["tank_transfers"] = [
-            {"from": "buffer", "to": "pool", "transfer_coefficient": 2.0, "max_transfer_power": 20000}
+            {
+                "from": "buffer",
+                "to": "pool",
+                "transfer_coefficient": 2.0,
+                "max_transfer_power": 20000,
+            }
         ]
         opt = self.create_optimization()
         res = opt.perform_optimization(
@@ -3705,7 +3760,8 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             np.full(48, 0.02),
         )
         self.assertIn(
-            "Optimal", str(res["optim_status"].iloc[0]),
+            "Optimal",
+            str(res["optim_status"].iloc[0]),
             "transfer must stay feasible when the receiver starts hotter than the feeder",
         )
 
