@@ -3529,6 +3529,21 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         tcol = [c for c in res.columns if "temp_shared_buffer" in c or "temp_heater" in c][0]
         return opt, res, res[tcol].to_numpy()
 
+    def test_dp_marginal_price_uses_export_price_on_pv_surplus(self):
+        """The DP marginal price must drop to the export price where PV is in surplus.
+        p_grid_neg is non-positive (export shows as < 0), so the surplus test is
+        `p_grid_neg < -1 W`. A sign slip here silently makes the super-heat-into-PV
+        feature dead code (the DP would never see the cheaper marginal cost)."""
+        tariff = np.array([0.40, 0.40, 0.40, 0.40])
+        export = np.array([0.02, 0.02, 0.02, 0.02])
+        # importing at t0; clear export at t1; negligible export (<1 W) at t2; export t3
+        p_grid_neg = np.array([0.0, -5000.0, -0.5, -3000.0])
+        price = Optimization._dp_marginal_price(tariff, p_grid_neg, export)
+        self.assertEqual(price[0], 0.40)  # importing -> import tariff
+        self.assertEqual(price[1], 0.02)  # exporting -> foregone export price
+        self.assertEqual(price[2], 0.40)  # negligible export -> import tariff
+        self.assertEqual(price[3], 0.02)  # exporting -> foregone export price
+
     def test_dp_cop_refinement_curbs_over_superheating(self):
         """static mode banks the buffer hot on the fake-high COP; auto mode runs the
         DP, prices the real COP, and super-heats less - engaging automatically exactly
@@ -4367,14 +4382,75 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertLess(
             temp.iloc[2], floor, "Tank must recover gradually, not jump to the floor"
         )
-        # window = max(6, ceil((45-35)/0.5)) = 20 steps; once it closes the
-        # configured floor is fully in force for the rest of the horizon.
+        # rate = min(0.5, 10/6) = 0.5 C/step -> window = ceil(10/0.5) = 20 steps; once
+        # it closes the configured floor is fully in force for the rest of the horizon.
         window = 20
         self.assertGreaterEqual(
             temp.iloc[window:].min(),
             floor - 0.1,
             "Configured floor must hold once the recovery window closes",
         )
+
+    def test_shared_tank_setback_floor_rising_after_start_recovers(self):
+        """The grace ramp must trigger on the binding floors at t >= 1, not on
+        min_temperatures[0] (the pinned start is never bounded). With a setback
+        schedule whose floor sits at the start value now but rises above it from t=1,
+        a high-mass tank cannot jump up in one step - and the old 'first non-None
+        floor' trigger (which read the low index-0 value) missed it entirely, leaving
+        the MILP infeasible. The ramp must engage off the t>=1 shortfall instead."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
+        self.optim_conf["number_of_deferrable_loads"] = 2
+        self.optim_conf["nominal_power_of_deferrable_loads"] = [3500, 3000]
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [0, 0]
+        self.optim_conf["operating_hours_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False, False]
+        self.optim_conf["set_deferrable_load_single_constant"] = [False, False]
+        self.optim_conf["set_deferrable_startup_penalty"] = [0.0, 0.0]
+        self.optim_conf["set_deferrable_max_startups"] = [0, 0]
+        self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["def_load_config"] = [
+            {"thermal_source": {"efficiency": 3.0}},
+            {"thermal_source": {"efficiency": 1.0}},
+        ]
+        start = 35.0
+        # Floor equals the start at t=0 (a setback ending now) and rises to 45 from
+        # t=1: min_temperatures[0] == start, so the old index-0 trigger never fired.
+        min_t = [35.0] + [45.0] * 47
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "dhw",
+                "load_ids": [0, 1],
+                "volume": 2.0,  # high mass: cannot climb 10 C in one 30-min step
+                "density": 1000,
+                "heat_capacity": 4.186,
+                "start_temperature": start,
+                "thermal_loss": 0.0,
+                "min_temperatures": min_t,
+                "max_temperatures": [65.0] * 48,
+            }
+        ]
+        opt = self.create_optimization()
+        ulc = self.df_input_data_dayahead[opt.var_load_cost].values
+        upp = self.df_input_data_dayahead[opt.var_prod_price].values
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            ulc,
+            upp,
+        )
+        # The ramp now engages off the t>=1 shortfall (45 - 35 = 10 C); without the
+        # fix this solve was Infeasible.
+        self.assertEqual(opt.optim_status, "Optimal")
+        tank_cols = [c for c in res.columns if "predicted_temp_heater" in c]
+        self.assertTrue(tank_cols, f"no tank temp column in {res.columns.tolist()}")
+        temp = res[tank_cols[0]].reset_index(drop=True)
+        self.assertAlmostEqual(temp.iloc[0], start, places=1)
+        self.assertLess(temp.iloc[2], 45.0, "Tank must recover gradually, not jump")
+        # max_deficit 10 C, rate 0.5 C/step -> window 20; floor 45 holds afterward.
+        self.assertGreaterEqual(temp.iloc[20:].min(), 45.0 - 0.1)
 
     async def test_full_stack_runtime_tanks_end_to_end(self):
         """Integration of the #539 stack through the runtime path: manual

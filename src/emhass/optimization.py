@@ -2992,29 +2992,38 @@ class Optimization:
                 )
             )
 
-        # Recovery grace: if the tank STARTS below its hard minimum (a momentary
-        # out-of-band sensor read - e.g. a zone dips below its comfort floor on a cold
-        # morning), demanding the full min from t=1 is infeasible for a rate-limited
-        # tank that cannot jump back into band in one step, and the relaxed-LP fallback
-        # cannot rescue that conflict. Instead, ramp the floor up linearly from the
-        # start value to the configured min over a short window, so the tank is required
-        # only to recover at a feasible pace. The configured min applies in full after
-        # the window; the desired-temperature penalty still pulls it up as fast as it can.
-        floor0 = next((v for v in min_temperatures_list if v is not None), None)
-        if floor0 is not None and start_temperature < floor0 - 1e-6:
-            window = max(SHARED_TANK_START_RECOVERY_STEPS,
-                         int(np.ceil((floor0 - start_temperature) / SHARED_TANK_START_RECOVERY_RATE)))
+        # Recovery grace: if the tank STARTS below a hard minimum it must satisfy
+        # soon (a momentary out-of-band sensor read - e.g. a zone dips below its
+        # comfort floor on a cold morning), demanding the full min from t=1 is
+        # infeasible for a rate-limited tank that cannot jump back into band in one
+        # step, and the relaxed-LP fallback cannot rescue that conflict. Instead,
+        # ramp every early floor up from the live start at a conservative rate, so the
+        # tank is only required to recover at a feasible pace; floors already at or
+        # below the ramp line are untouched, and each configured floor reapplies in
+        # full once the ramp line overtakes it. Index 0 is the pinned live start and
+        # is never bounded (see _add_temp_bound), so only the constrained floors at
+        # t >= 1 drive the trigger - a setback floor that rises only at t >= 1 (where
+        # min_temperatures[0] may sit below the start) is caught too.
+        constrained_floors = [
+            v for t, v in enumerate(min_temperatures_list) if t >= 1 and v is not None
+        ]
+        max_deficit = max((v - start_temperature for v in constrained_floors), default=0.0)
+        if max_deficit > 1e-6:
+            # Never steeper than the conservative rate, and small shortfalls are still
+            # spread over at least the minimum window so recovery stays gentle.
+            rate = min(SHARED_TANK_START_RECOVERY_RATE,
+                       max_deficit / SHARED_TANK_START_RECOVERY_STEPS)
+            window = int(np.ceil(max_deficit / rate))
             min_temperatures_list = list(min_temperatures_list)
             for t in range(min(window, len(min_temperatures_list))):
                 cfg = min_temperatures_list[t]
                 if cfg is None:
                     continue
-                ramp = start_temperature + (cfg - start_temperature) * (t / window)
-                min_temperatures_list[t] = min(cfg, ramp)
+                min_temperatures_list[t] = min(cfg, start_temperature + rate * t)
             self.logger.info(
-                "Shared tank '%s': start %.1f C below floor %.1f C - ramping the min "
-                "back into band over %d steps to stay feasible",
-                tank_id, start_temperature, floor0, window,
+                "Shared tank '%s': start %.1f C below a near-term floor (max shortfall "
+                "%.1f C) - ramping the min back into band over %d steps to stay feasible",
+                tank_id, start_temperature, max_deficit, window,
             )
 
         # Hard min/max temperature bounds (shared helper; index 0 already pinned).
@@ -3210,6 +3219,25 @@ class Optimization:
 
         return predicted_temp, heating_demand, penalty_term
 
+    @staticmethod
+    def _dp_marginal_price(tariff, p_grid_neg, export_price):
+        """Marginal cost of heat-pump electricity per step for the DP.
+
+        Where the system imports, the heat pump's marginal cost is the import
+        ``tariff``. Where PV is in surplus, running the heat pump instead forgoes the
+        export revenue, so its true marginal cost is the (lower) ``export_price``.
+        Feeding this to the DP makes it super-heat into free solar rather than just
+        the cheapest tariff hour.
+
+        ``p_grid_neg`` is the export power, non-positive by convention
+        (``cp.Variable(nonpos=True)``): a surplus shows up as ``p_grid_neg < 0``. The
+        ``< -1.0`` threshold (W) ignores numerically negligible export.
+        """
+        tariff = np.asarray(tariff, dtype=float)
+        p_exp = np.asarray(p_grid_neg, dtype=float)
+        export_price = np.asarray(export_price, dtype=float)
+        return np.where(p_exp < -1.0, export_price, tariff)
+
     def _refine_cop_with_dp(self, selected_solver, solver_opts):
         """Post-solve COP refinement via the thermal DP.
 
@@ -3238,9 +3266,11 @@ class Optimization:
         # first solve's grid position; the re-solve then places the load against PV.
         tariff = np.asarray(self.param_load_cost.value, dtype=float)[:n]
         try:
-            p_exp = np.asarray(self.vars["p_grid_neg"].value, dtype=float)[:n]
-            export_price = np.asarray(self.param_prod_price.value, dtype=float)[:n]
-            price = np.where(p_exp > 1.0, export_price, tariff)
+            price = self._dp_marginal_price(
+                tariff,
+                np.asarray(self.vars["p_grid_neg"].value, dtype=float)[:n],
+                np.asarray(self.param_prod_price.value, dtype=float)[:n],
+            )
         except Exception:
             price = tariff
         self.logger.info(
@@ -3281,7 +3311,8 @@ class Optimization:
                 m = min(len(xfer_val), len(pool_xfer))
                 ext[:m] -= pool_xfer[:m]
             demand_kw = np.maximum(ext, 0.0) / dt
-            outdoor_ref = float(np.mean(e["outdoor"]))
+            outdoor_arr = np.asarray(e["outdoor"], dtype=float)[:n]
+            outdoor_ref = float(np.mean(outdoor_arr))
             backup = e["backup"]
             backup_price = 1e6
             if backup is not None and getattr(self, "param_cost_per_load", None):
@@ -3314,7 +3345,7 @@ class Optimization:
                 **coupled_kwargs,
             )
             res = solve_thermal_dp(
-                price, outdoor_ref, params, time_step=dt, tank_start=e["start_temperature"],
+                price, outdoor_arr, params, time_step=dt, tank_start=e["start_temperature"],
                 coupled_start=(coupled["start_temperature"] if coupled else 26.5),
             )
             dp_temp = np.asarray(res.tank_trajectory[:n], dtype=float)
