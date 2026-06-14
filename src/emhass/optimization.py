@@ -3409,11 +3409,16 @@ class Optimization:
                         e["tank_id"],
                     )
                     continue
-                dp_temp = np.asarray(res.tank_trajectory[:n], dtype=float)
+                traj = np.asarray(res.tank_trajectory, dtype=float)  # length n + 1
+                # Set the MILP COP at each step's TARGET (end) temperature, matching how
+                # the DP priced the charge (the HP runs at the supply needed to reach
+                # T[t+1]), so the re-solve is consistent with the trajectory the DP found.
+                end_temp = traj[1 : n + 1]
                 hp["cop_param"].value = utils.cop_from_tank_temperature(
-                    dp_temp, hp["carnot"], outdoor_arr, approach=hp["approach"]
+                    end_temp, hp["carnot"], outdoor_arr, approach=hp["approach"]
                 )
-                extra_constraints.append(e["predicted_temp"] <= float(dp_temp.max()) + 1.0)
+                peak = float(traj[:n].max())
+                extra_constraints.append(e["predicted_temp"] <= peak + 1.0)
                 refined = True
                 self.logger.info(
                     "DP COP refinement on tank '%s': COP inconsistency %.2f > %.2f - "
@@ -3421,7 +3426,7 @@ class Optimization:
                     e["tank_id"],
                     max_err,
                     tol,
-                    dp_temp.max(),
+                    peak,
                     float(np.sum(res.backup_input_per_step) * dt),
                 )
             except Exception as exc:

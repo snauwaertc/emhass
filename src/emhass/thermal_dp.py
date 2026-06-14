@@ -87,24 +87,6 @@ class ThermalDPResult:
     meta: dict = field(default_factory=dict)
 
 
-def _cop_curve(grid: np.ndarray, p: ThermalDPParams, outdoor: float | np.ndarray) -> np.ndarray:
-    """COP for charging the store to each ``grid`` temperature.
-
-    ``outdoor`` may be a scalar (returns shape ``(len(grid),)``) or a per-step array
-    (returns ``(len(outdoor), len(grid))`` so the COP varies with both store
-    temperature and the outdoor temperature at each step).
-    """
-    supply = grid + p.hx_approach
-    outdoor = np.asarray(outdoor, dtype=float)
-    if outdoor.ndim == 0:
-        cop = p.carnot_efficiency * (supply + 273.15) / (supply - outdoor)
-    else:
-        cop = (
-            p.carnot_efficiency * (supply[None, :] + 273.15) / (supply[None, :] - outdoor[:, None])
-        )
-    return np.clip(cop, p.cop_bounds[0], p.cop_bounds[1])
-
-
 def solve_thermal_dp(
     price: np.ndarray,
     outdoor_temperature: float | np.ndarray,
@@ -119,10 +101,12 @@ def solve_thermal_dp(
     returns the globally optimal store temperature trajectory and the heat-pump /
     backup dispatch.
 
-    Outdoor temperature may be a scalar or a per-step array. The COP grid is built
-    per timestep from the outdoor temperature at that step, so intraday swings (a
-    cold dawn, a mild PV-rich midday) are reflected in the true COP the DP optimises
-    against - not averaged away.
+    Outdoor temperature may be a scalar or a per-step array; the COP is evaluated per
+    timestep against that step's outdoor temperature, so intraday swings (a cold dawn,
+    a mild PV-rich midday) are reflected - not averaged away. For a charging step the COP
+    is taken at the TARGET (end-of-step) temperature ``T[t+1] + approach``: over a control
+    step the heat pump runs at the supply temperature needed to reach the step's setpoint,
+    so the COP is set by the temperature it heats to, not the cooler one it starts from.
     """
     import time
 
@@ -152,13 +136,21 @@ def solve_thermal_dp(
     else:
         grid = np.array([p.min_temp])
     nt = len(grid)
-    # Per-step COP grid: cop2d[t, j] is the COP charging the store to grid[j] under
-    # the outdoor temperature at step t. A 2D grid keeps the backward induction exact
-    # when the outdoor temperature varies across the horizon.
-    cop2d = _cop_curve(grid, p, outdoor_arr)  # (N, nt)
-    loss = p.loss_coeff * (grid - p.ambient_temperature) * dt
-    hp_cap_th = p.hp_max_power * cop2d * dt  # (N, nt) thermal kWh the HP can deliver
+    # COP for a charging step i -> j is taken at the TARGET temperature grid[j]: over a
+    # 30-minute control step the heat pump receives one setpoint and runs its condenser
+    # at the supply temperature needed to REACH it (grid[j] + approach), so the COP is set
+    # by the temperature it heats TO, not the cooler temperature it starts from. This is
+    # both the physically faithful model for a setpoint-driven HP and the conservative one
+    # (it prices a large heating step at its true cost). cop2d[t, j] evaluates the target
+    # supply against step t's outdoor temperature, so an intraday swing is still captured.
+    supply = grid + p.hx_approach  # (nt,) condenser supply needed to reach each target temp
+    cop2d = np.clip(
+        p.carnot_efficiency * (supply[None, :] + 273.15) / (supply[None, :] - outdoor_arr[:, None]),
+        *p.cop_bounds,
+    )  # (N, nt): cop2d[t, j] = COP to charge to grid[j] at step t
+    hp_cap_th = p.hp_max_power * cop2d * dt  # (N, nt) thermal kWh the HP delivers reaching j
     qin_max = (p.hp_max_power * cop2d + p.backup_max_power * p.backup_efficiency) * dt  # (N, nt)
+    loss = p.loss_coeff * (grid - p.ambient_temperature) * dt
     cp_backup = p.backup_price / p.backup_efficiency
 
     use_coupled = p.coupled_heat_capacity is not None
@@ -182,13 +174,15 @@ def solve_thermal_dp(
 
     INF = 1e15
 
-    def cheapest(Qin: np.ndarray, t: int) -> np.ndarray:
-        """Per-temperature cost to deliver Qin (kWh thermal) at step t."""
+    def cheapest(Qin: np.ndarray, t: int, j: int) -> np.ndarray:
+        """Cost over each current state i to deliver Qin (kWh thermal) at step t while
+        charging to target j (the HP runs at grid[j]'s supply temperature, so the COP is
+        the scalar cop2d[t, j])."""
         Qpos = np.maximum(Qin, 0.0)
-        cop_t = cop2d[t]
+        cop_t = cop2d[t, j]
         qhp = np.where(
             price[t] / cop_t <= cp_backup,
-            np.minimum(Qpos, hp_cap_th[t]),
+            np.minimum(Qpos, hp_cap_th[t, j]),
             np.maximum(Qpos - p.backup_max_power * p.backup_efficiency * dt, 0.0),
         )
         qbk = Qpos - qhp
@@ -205,8 +199,8 @@ def solve_thermal_dp(
             base = (grid[j] - grid) * p.heat_capacity + demand[t] * dt + loss
             for qi, qxf in enumerate(qxf_levels):
                 Qin = base + qxf
-                cost = cheapest(Qin, t)
-                feas_t = (Qin >= -1e-9) & (Qin <= qin_max[t] + 1e-9)
+                cost = cheapest(Qin, t, j)
+                feas_t = (Qin >= -1e-9) & (Qin <= qin_max[t, j] + 1e-9)
                 if use_coupled:
                     Tc2 = cgrid + (qxf - closs) / p.coupled_heat_capacity
                     feas_c = (Tc2 >= cgrid[0] - 1e-9) & (Tc2 <= cgrid[-1] + 1e-9)
@@ -243,15 +237,15 @@ def solve_thermal_dp(
         j = int(POL[t, it, ic, 0])
         qxf = qxf_levels[int(POL[t, it, ic, 1])]
         Qin = max(0.0, (grid[j] - grid[it]) * p.heat_capacity + demand[t] * dt + loss[it] + qxf)
-        cop_it = cop2d[t, it]
-        if price[t] / cop_it <= cp_backup:
-            qhp = min(Qin, hp_cap_th[t, it])
+        cop_ij = cop2d[t, j]  # COP to reach the target temperature grid[j]
+        if price[t] / cop_ij <= cp_backup:
+            qhp = min(Qin, hp_cap_th[t, j])
             qbk = Qin - qhp
         else:
             qbk = min(Qin, p.backup_max_power * p.backup_efficiency * dt)
             qhp = Qin - qbk
-        cost += (qhp / cop_it) * price[t] + (qbk / p.backup_efficiency) * p.backup_price
-        hp_draw[t] = qhp / cop_it / dt
+        cost += (qhp / cop_ij) * price[t] + (qbk / p.backup_efficiency) * p.backup_price
+        hp_draw[t] = qhp / cop_ij / dt
         bk_draw[t] = qbk / p.backup_efficiency / dt
         if use_coupled:
             Tc2 = cgrid[ic] + (qxf - closs[ic]) / p.coupled_heat_capacity
