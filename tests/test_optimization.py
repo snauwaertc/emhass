@@ -6867,6 +6867,65 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             "Mutual exclusion violated: both loads active simultaneously",
         )
 
+    def test_mutual_exclusion_honoured_for_shared_tank_sources(self):
+        """Mutual exclusion must hold for shared-tank heat sources (issue #539).
+        Two continuous heat-pump sources feed one shared tank; a group marks them
+        mutually exclusive (one compressor cannot serve two flows at once). Demand
+        is met comfortably by a single source, so the constraint is feasible and
+        must be honoured - the two sources never run in the same timestep. This
+        guards the regression where an infeasible/timed-out MILP fell back to the
+        relaxed LP, which used to silently drop mutual exclusion and schedule both."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
+        self.optim_conf["number_of_deferrable_loads"] = 2
+        self.optim_conf["nominal_power_of_deferrable_loads"] = [3000, 3000]
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [0, 0]
+        self.optim_conf["operating_hours_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False, False]
+        self.optim_conf["set_deferrable_load_single_constant"] = [False, False]
+        self.optim_conf["set_deferrable_startup_penalty"] = [0.0, 0.0]
+        self.optim_conf["set_deferrable_max_startups"] = [0, 0]
+        self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["def_load_config"] = [
+            {"thermal_source": {"supply_temperature": 45.0, "carnot_efficiency": 0.45}},
+            {"thermal_source": {"supply_temperature": 45.0, "carnot_efficiency": 0.45}},
+        ]
+        draw = [0.0] * 48
+        for i in range(10, 44):
+            draw[i] = 0.8
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "dhw",
+                "load_ids": [0, 1],
+                "volume": 0.3,
+                "density": 1000,
+                "heat_capacity": 4.186,
+                "start_temperature": 50.0,
+                "thermal_loss": 0.1,
+                "draw_off_demand": draw,
+                "min_temperatures": [45.0] * 48,
+                "max_temperatures": [60.0] * 48,
+            }
+        ]
+        self.optim_conf["deferrable_load_groups"] = [
+            {"names": ["deferrable0", "deferrable1"], "mutual_exclusion": True}
+        ]
+        opt = self.create_optimization()
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        self.assertEqual(opt.optim_status, "Optimal")
+        both_active = (res["P_deferrable0"] > 1.0) & (res["P_deferrable1"] > 1.0)
+        self.assertFalse(
+            both_active.any(),
+            "Mutual exclusion violated for shared-tank sources: both fired in the same slot",
+        )
+
     def test_deferrable_load_group_no_groups(self):
         """Test that empty deferrable_load_groups works (backward compatibility)."""
         self.optim_conf["deferrable_load_groups"] = []
