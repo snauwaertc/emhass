@@ -26,8 +26,11 @@ def test_dp_prefers_heat_pump_when_genuinely_cheaper():
     costs tie and the backup can be optimal for forced maintenance - the DP gets that
     right too; this test isolates the clear case.)"""
     params = ThermalDPParams(
-        coupled_heat_capacity=163.0, coupled_min_temp=26.0, coupled_max_temp=30.0,
-        demand_kw=2.0, heat_capacity=1.163,
+        coupled_heat_capacity=163.0,
+        coupled_min_temp=26.0,
+        coupled_max_temp=30.0,
+        demand_kw=2.0,
+        heat_capacity=1.163,
     )
     mild = _spread_price(cheap=0.08, dear=0.22)  # 0.22/COP(~4.7) = 0.047 << gas 0.105
     res = solve_thermal_dp(mild, outdoor_temperature=8.0, params=params)
@@ -38,8 +41,9 @@ def test_dp_prefers_heat_pump_when_genuinely_cheaper():
 
 def test_dp_solves_quickly():
     """The 2-state DP must be fast enough to live inside the optimisation loop."""
-    params = ThermalDPParams(coupled_heat_capacity=163.0, coupled_min_temp=26.0,
-                             coupled_max_temp=30.0, demand_kw=2.0)
+    params = ThermalDPParams(
+        coupled_heat_capacity=163.0, coupled_min_temp=26.0, coupled_max_temp=30.0, demand_kw=2.0
+    )
     res = solve_thermal_dp(_spread_price(), outdoor_temperature=8.0, params=params)
     assert res.solve_seconds < 10.0
     assert res.coupled_trajectory is not None
@@ -57,11 +61,17 @@ def test_dp_uses_per_step_outdoor_not_the_mean():
     price = np.array([0.21, 0.21, 0.21, 0.20, 0.20, 0.20])
     warm_then_cold = np.array([15.0, 15.0, 15.0, -5.0, -5.0, -5.0])
     params = ThermalDPParams(
-        heat_capacity=2.0, loss_coeff=0.0, min_temp=44.0, max_temp=60.0,
-        hp_max_power=3.0, backup_max_power=0.0, demand_kw=2.0,
+        heat_capacity=2.0,
+        loss_coeff=0.0,
+        min_temp=44.0,
+        max_temp=60.0,
+        hp_max_power=3.0,
+        backup_max_power=0.0,
+        demand_kw=2.0,
     )
     per_step = solve_thermal_dp(price, warm_then_cold, params, tank_start=45.0)
     mean_run = solve_thermal_dp(price, float(np.mean(warm_then_cold)), params, tank_start=45.0)
+    assert len(per_step.tank_trajectory) == N + 1
 
     def early_share(res):
         total = res.hp_electric_per_step.sum()
@@ -78,7 +88,8 @@ def test_dp_caps_coupled_state_count():
     while the band itself is preserved."""
     params = ThermalDPParams(
         coupled_heat_capacity=163.0,
-        coupled_min_temp=0.0, coupled_max_temp=100.0,  # 1001 states at the raw 0.1 step
+        coupled_min_temp=0.0,
+        coupled_max_temp=100.0,  # 1001 states at the raw 0.1 step
         coupled_grid_step=0.1,
         demand_kw=2.0,
     )
@@ -91,8 +102,10 @@ def test_dp_caps_coupled_state_count():
     # not blow up the count (an arange-with-epsilon would have produced thousands).
     micro = ThermalDPParams(
         coupled_heat_capacity=100.0,
-        coupled_min_temp=26.0, coupled_max_temp=26.00000001,
-        coupled_grid_step=1e-9, demand_kw=1.0,
+        coupled_min_temp=26.0,
+        coupled_max_temp=26.00000001,
+        coupled_grid_step=1e-9,
+        demand_kw=1.0,
     )
     res_micro = solve_thermal_dp(np.full(6, 0.2), outdoor_temperature=8.0, params=micro)
     assert res_micro.meta["coupled_states"] <= MAX_COUPLED_STATES
