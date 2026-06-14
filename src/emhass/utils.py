@@ -331,7 +331,7 @@ def resolve_min_temperatures(
     config: dict,
     outdoor_temperature_forecast: np.ndarray | pd.Series | list | None,
     length: int,
-) -> list[float]:
+) -> list[float | None]:
     """Compute the effective per-slot lower temperature bound for a storage tank.
 
     Combines two sources, taking the element-wise max so the more conservative
@@ -390,7 +390,11 @@ def resolve_min_temperatures(
     else:
         effective = static_arr
 
-    return [float(v) for v in effective]
+    # A null/None entry in the static list survives np.asarray(dtype=float) as nan.
+    # Map it back to None so the downstream "v is not None" guards (the hard-bound and
+    # comfort-penalty builders, the recovery ramp) correctly read it as "no floor at
+    # this step" rather than letting a nan propagate into the LP.
+    return [None if np.isnan(v) else float(v) for v in effective]
 
 
 def cop_from_tank_temperature(

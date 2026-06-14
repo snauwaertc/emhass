@@ -3455,6 +3455,19 @@ class TestResolveMinTemperatures(unittest.TestCase):
         out = utils.resolve_min_temperatures(cfg, None, length=48)
         self.assertEqual(out, [25.0] * 48)
 
+    def test_null_entries_become_none_not_nan(self):
+        """A null/None entry (an unbounded step) must come back as None, not nan.
+        np.asarray(dtype=float) turns None into nan; if that leaked, the downstream
+        `v is not None` guards in the bound/penalty builders would pass it straight
+        into the LP as a `>= nan` constraint."""
+        cfg = {"min_temperatures": [45.0, None, 45.0, None, 45.0]}
+        out = utils.resolve_min_temperatures(cfg, None, length=5)
+        self.assertEqual(out, [45.0, None, 45.0, None, 45.0])
+        self.assertFalse(
+            any(isinstance(v, float) and np.isnan(v) for v in out),
+            "no nan may leak from a null floor entry",
+        )
+
     def test_curve_only(self):
         """A config with only `min_temperature_curve` returns per-slot derived floor."""
         cfg = {
