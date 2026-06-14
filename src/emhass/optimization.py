@@ -3108,7 +3108,47 @@ class Optimization:
                     backup = {"load_idx": k, "efficiency": float(bcfg["efficiency"]),
                               "nominal_power": float(bnom)}
                     break
+            # Optional coupled store: the largest-capacity tank this tank feeds (e.g. a
+            # pool). The DP refines the two jointly so super-heating accounts for what
+            # the coupled store can bank. Its comfort floor is desired-1 C (not the raw
+            # min) so the DP keeps it near target rather than parking it at the floor.
+            coupled = None
+            for tr in (self._get_tank_transfers() if transfer_vars else []):
+                if tr["from"] != tank_id:
+                    continue
+                tgt = next(
+                    (s for s in self._get_shared_thermal_tanks() if s.get("id") == tr["to"]), None
+                )
+                if tgt is None:
+                    continue
+                tm = tgt.get("thermal_mass")
+                if tm is not None:
+                    hc = float(tm)
+                elif tgt.get("volume"):
+                    hc = (float(tgt.get("density", 1000)) * float(tgt.get("heat_capacity", 4.186))
+                          * float(tgt["volume"]) / 3600.0)
+                else:
+                    continue
+                if hc < 20.0 or (coupled is not None and hc <= coupled["heat_capacity"]):
+                    continue  # couple only to a substantial banking store, the largest one
+                des = tgt.get("desired_temperatures")
+                des_v = (min(np.atleast_1d(des)) if des is not None else None)
+                cmins = [v for v in (tgt.get("min_temperatures") or []) if v is not None]
+                cmaxs = [v for v in (tgt.get("max_temperatures") or []) if v is not None]
+                floor = (float(des_v) - 1.0) if des_v is not None else (
+                    float(min(cmins)) if cmins else float(tgt.get("start_temperature", 26.0)) - 1.0)
+                coupled = {
+                    "heat_capacity": hc,
+                    "loss_coefficient": float(tgt.get("loss_coefficient") or 0.0),
+                    "min_temp": floor,
+                    "max_temp": float(max(cmaxs)) if cmaxs else float(tgt.get("start_temperature", 30.0)) + 3.0,
+                    "start_temperature": float(tgt.get("start_temperature", floor + 0.5)),
+                    "coupling_coeff": float(tr.get("transfer_coefficient", 1.0)),
+                    "coupling_max_power": float(tr.get("max_transfer_power", 20000.0)),
+                    "q_var": transfer_vars.get((tr["from"], tr["to"])),
+                }
             self._dp_tank_entries.append({
+                "coupled": coupled,
                 "tank_id": tank_id,
                 "predicted_temp": predicted_temp,
                 "conversion": float(conversion),
@@ -3148,7 +3188,18 @@ class Optimization:
         tol = float(self.optim_conf.get("cop_solver_tolerance", 0.5))
         dt = self.time_step
         n = self.num_timesteps
-        price = np.asarray(self.param_load_cost.value, dtype=float)
+        # Marginal cost of heat-pump electricity per step: the import tariff where the
+        # system buys from the grid, and the (much lower) foregone export price where PV
+        # is in surplus. Feeding this to the DP instead of the raw tariff makes it
+        # super-heat into free solar, not just the cheapest tariff hour. Taken from the
+        # first solve's grid position; the re-solve then places the load against PV.
+        tariff = np.asarray(self.param_load_cost.value, dtype=float)[:n]
+        try:
+            p_exp = np.asarray(self.vars["p_grid_neg"].value, dtype=float)[:n]
+            export_price = np.asarray(self.param_prod_price.value, dtype=float)[:n]
+            price = np.where(p_exp > 1.0, export_price, tariff)
+        except Exception:
+            price = tariff
         extra_constraints = []
         refined = False
         for e in entries:
@@ -3170,6 +3221,14 @@ class Optimization:
             xfer_val = np.asarray(getattr(xfer, "value", xfer), dtype=float)
             ext = e["heating_demand"][:n].astype(float).copy()
             ext[: len(xfer_val)] -= xfer_val  # xfer_net = inflow - outflow
+            coupled = e.get("coupled")
+            if coupled is not None and coupled.get("q_var") is not None:
+                # ext currently = draw-off + outflow-to-coupled + other outflow. The
+                # flow to the coupled store is the DP's coupling decision (re-optimised),
+                # not a fixed demand, so subtract it back out of the demand.
+                pool_xfer = np.asarray(coupled["q_var"].value, dtype=float) * dt
+                m = min(len(xfer_val), len(pool_xfer))
+                ext[:m] -= pool_xfer[:m]
             demand_kw = np.maximum(ext, 0.0) / dt
             outdoor_ref = float(np.mean(e["outdoor"]))
             backup = e["backup"]
@@ -3178,6 +3237,16 @@ class Optimization:
                 idx = backup["load_idx"]
                 if idx < len(self.param_cost_per_load) and self.param_cost_per_load[idx].value is not None:
                     backup_price = float(np.mean(self.param_cost_per_load[idx].value))
+            coupled_kwargs = {}
+            if coupled is not None:
+                coupled_kwargs = dict(
+                    coupled_heat_capacity=coupled["heat_capacity"],
+                    coupled_loss_coeff=coupled["loss_coefficient"],
+                    coupled_min_temp=coupled["min_temp"],
+                    coupled_max_temp=coupled["max_temp"],
+                    coupling_coeff=coupled["coupling_coeff"],
+                    coupling_max_power=coupled["coupling_max_power"] / 1000.0,
+                )
             params = ThermalDPParams(
                 heat_capacity=1.0 / e["conversion"],
                 loss_coeff=(e["loss_coefficient"] or 0.0),
@@ -3191,9 +3260,11 @@ class Optimization:
                 backup_price=backup_price,
                 demand_kw=demand_kw,
                 ambient_temperature=outdoor_ref,  # EMHASS tanks lose to outdoor
+                **coupled_kwargs,
             )
             res = solve_thermal_dp(
-                price, outdoor_ref, params, time_step=dt, tank_start=e["start_temperature"]
+                price, outdoor_ref, params, time_step=dt, tank_start=e["start_temperature"],
+                coupled_start=(coupled["start_temperature"] if coupled else 26.5),
             )
             dp_temp = np.asarray(res.tank_trajectory[:n], dtype=float)
             hp["cop_param"].value = utils.cop_from_tank_temperature(
