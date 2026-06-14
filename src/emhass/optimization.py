@@ -2144,12 +2144,20 @@ class Optimization:
 
         # Hard min/max temperature bounds (shared helper).
         self._add_temp_bound(
-            constraints, predicted_temp, hc.get("min_temperatures", []),
-            min_temps_param, required_len, lower=True,
+            constraints,
+            predicted_temp,
+            hc.get("min_temperatures", []),
+            min_temps_param,
+            required_len,
+            lower=True,
         )
         self._add_temp_bound(
-            constraints, predicted_temp, hc.get("max_temperatures", []),
-            max_temps_param, required_len, lower=False,
+            constraints,
+            predicted_temp,
+            hc.get("max_temperatures", []),
+            max_temps_param,
+            required_len,
+            lower=False,
         )
 
         # Soft comfort: shared overshoot indicator + load-specific power
@@ -2158,13 +2166,22 @@ class Optimization:
         desired_temps_list = hc.get("desired_temperatures", [])
         if desired_temps_list and overshoot_temperature is not None:
             is_overshoot = self._overshoot_indicator(
-                constraints, predicted_temp, overshoot_temperature, sense, 100,
-                f"is_overshoot_{k}", required_len,
+                constraints,
+                predicted_temp,
+                overshoot_temperature,
+                sense,
+                100,
+                f"is_overshoot_{k}",
+                required_len,
             )
             constraints.append(is_overshoot[1:] + p_def_bin2[:-1] <= 1)
             pen = self._comfort_penalty(
-                predicted_temp, desired_temps_list, desired_temps_param,
-                hc.get("penalty_factor", 10), sense_coeff, required_len,
+                predicted_temp,
+                desired_temps_list,
+                desired_temps_param,
+                hc.get("penalty_factor", 10),
+                sense_coeff,
+                required_len,
             )
             total_penalty = pen if pen is not None else 0
 
@@ -2590,8 +2607,13 @@ class Optimization:
 
         if desired_temps_list and overshoot_temperature is not None:
             is_overshoot = self._overshoot_indicator(
-                constraints, predicted_temp_thermal, overshoot_temperature, sense, 100,
-                f"is_overshoot_tb_{k}", required_len,
+                constraints,
+                predicted_temp_thermal,
+                overshoot_temperature,
+                sense,
+                100,
+                f"is_overshoot_tb_{k}",
+                required_len,
             )
             # Prevent heating when in overshoot - p_def_bin2 if semi-cont, else bound power.
             if self.optim_conf["treat_deferrable_load_as_semi_cont"][k]:
@@ -2609,8 +2631,12 @@ class Optimization:
                 else None
             )
             pen = self._comfort_penalty(
-                predicted_temp_thermal, desired_temps_list, desired_param,
-                hc.get("penalty_factor", 10), sense_coeff, required_len,
+                predicted_temp_thermal,
+                desired_temps_list,
+                desired_param,
+                hc.get("penalty_factor", 10),
+                sense_coeff,
+                required_len,
             )
             penalty_expr = pen if pen is not None else 0
 
@@ -2878,7 +2904,7 @@ class Optimization:
         # Net tank->tank transfer per step (kWh): +inflow (this tank is a 'to'),
         # -outflow (this tank is a 'from'). Length required_len-1; zeros if none.
         xfer_net = np.zeros(required_len - 1)
-        for tr in (self._get_tank_transfers() if transfer_vars else []):
+        for tr in self._get_tank_transfers() if transfer_vars else []:
             q_var = transfer_vars.get((tr["from"], tr["to"]))
             if q_var is None:
                 continue
@@ -3004,8 +3030,13 @@ class Optimization:
                 if finite_min_temps:
                     big_m_os = max(big_m_os, overshoot - min(finite_min_temps))
                 is_overshoot = self._overshoot_indicator(
-                    constraints, predicted_temp, overshoot, sense, big_m_os,
-                    f"is_overshoot_shared_{tank_id}_{k}", required_len,
+                    constraints,
+                    predicted_temp,
+                    overshoot,
+                    sense,
+                    big_m_os,
+                    f"is_overshoot_shared_{tank_id}_{k}",
+                    required_len,
                 )
                 # Suppress THIS source while the tank is beyond its threshold -
                 # same gating split as the thermal_battery soft constraints.
@@ -3022,8 +3053,12 @@ class Optimization:
             # Comfort-shortfall penalty toward the desired band (shared helper):
             # only deviation below desired (heat) / above (cool) is priced.
             penalty_term = self._comfort_penalty(
-                predicted_temp, desired_temps_list, None,
-                tank.get("penalty_factor", 10), sense_coeff, required_len,
+                predicted_temp,
+                desired_temps_list,
+                None,
+                tank.get("penalty_factor", 10),
+                sense_coeff,
+                required_len,
             )
 
         return predicted_temp, heating_demand, penalty_term
@@ -3560,7 +3595,9 @@ class Optimization:
         transfers = self._get_tank_transfers()
         transfer_vars = {}
         for tr in transfers:
-            q_var = cp.Variable(self.num_timesteps, nonneg=True, name=f"xfer_{tr['from']}_{tr['to']}")
+            q_var = cp.Variable(
+                self.num_timesteps, nonneg=True, name=f"xfer_{tr['from']}_{tr['to']}"
+            )
             constraints.append(q_var <= tr["max_transfer_power"] / 1000.0)
             transfer_vars[(tr["from"], tr["to"])] = q_var
 
@@ -3610,9 +3647,7 @@ class Optimization:
                     self.num_timesteps, boolean=True, name=f"xfer_on_{tr['from']}_{tr['to']}"
                 )
                 big_m_xfer = k_xfer * SHARED_TANK_CAP_BIG_M_TEMP
-                constraints.append(
-                    q_var <= k_xfer * (t_from - t_to) + big_m_xfer * (1 - xfer_on)
-                )
+                constraints.append(q_var <= k_xfer * (t_from - t_to) + big_m_xfer * (1 - xfer_on))
                 constraints.append(q_var <= qmax * xfer_on)
 
         return predicted_temps, heating_demands, penalty_terms_total, q_inputs
