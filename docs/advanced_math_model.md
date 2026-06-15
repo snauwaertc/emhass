@@ -387,6 +387,29 @@ The refinement is controlled by two `optim_conf` options:
   (the max absolute difference between the COP the solve used and the COP at the
   temperature it achieved) `auto` tolerates before engaging the DP.
 
+## Solver tractability: the MIP gap on long or complex problems
+
+A MILP solver does two things: it *finds* a good integer solution, and then it
+*proves* that solution is optimal by closing the gap between the best solution and
+the best theoretical bound. With `lp_solver_mip_rel_gap = 0` (the default) it must
+drive that gap to zero - prove exact optimality - and that proof is the expensive
+part. The number of binary variables (mutual-exclusion groups, the
+`max_supply_temperature` cap gates, semi-continuous and single-constant loads)
+grows with the horizon, so the branch-and-bound search can explode on a long
+horizon or a rich [heat topology](heat_topology.md).
+
+Concretely: a 48-hour (96-step) day-ahead optimization of a hybrid system with
+several tanks and mutual-exclusion groups can fail to solve within any practical
+`lp_solver_timeout` at `gap = 0` (it returns `User_Limit` with no plan), because the
+solver keeps trying to *prove* optimality long after it has *found* the optimum.
+Setting `lp_solver_mip_rel_gap` to a small value (e.g. `0.02`) tells it to stop once
+the solution is provably within 2% of optimal - which collapses the same problem to
+a few seconds. In practice the quality cost is negligible (the returned plan is
+typically the true optimum; only the *certificate* is relaxed). Reach for this lever
+whenever a long horizon, many deferrable loads, or a complex topology makes the
+solve time-out; a 24-hour horizon usually solves fast enough at `gap = 0`. See
+`lp_solver_mip_rel_gap` in [the configuration reference](config.md).
+
 ## The EMHASS optimizations
 
 There are 3 different optimization types that are implemented in EMHASS.
