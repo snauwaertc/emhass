@@ -75,6 +75,16 @@ which drives the Carnot COP:
 
 A heat-pump source must provide one of `heating_curve` or `supply_temperature`.
 
+> **`supply_temperature` drives the COP only - it is not a physical ceiling.**
+> A constant-supply heat pump cannot heat water above its supply temperature, but
+> the optimiser does not enforce that automatically: without a
+> `max_supply_temperature` it may plan to drive the storage above
+> `supply_temperature` (a physically unreachable setpoint), and the compiler logs a
+> warning when it sees this. To cap the storage at the supply temperature, set
+> `max_supply_temperature` equal to `supply_temperature`. The cap is left opt-in
+> because it can make a storage whose `min_temperature` sits at the supply
+> temperature infeasible (a source cannot add heat at zero temperature difference).
+
 **Fuel / constant-efficiency sources** (`gas`, `oil`, `district`, `electric`,
 `constant_efficiency`) instead need:
 
