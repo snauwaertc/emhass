@@ -151,3 +151,32 @@ def test_dp_flags_infeasible_when_demand_exceeds_deliverable_heat():
     res_ok = solve_thermal_dp(np.full(4, 0.2), outdoor_temperature=10.0, params=ok, tank_start=30.0)
     assert res_ok.meta["infeasible"] is False
     assert np.isfinite(res_ok.total_cost)
+
+
+def test_dp_feasible_when_feeder_colder_than_coupled_store():
+    """A coupled store warmer than its feeder must NOT make the DP infeasible. Heat
+    can't flow uphill into it, but transferring nothing (qxf=0) is always legal -
+    the store just coasts. The conductance bound must be clamped at 0; without the
+    clamp it goes negative and qxf in [0, negative] is empty, spuriously flagging
+    every such state infeasible (the buffer/pool case where the buffer starts cool)."""
+    params = ThermalDPParams(
+        min_temp=25.0,
+        max_temp=65.0,
+        hp_max_power=4.0,
+        backup_max_power=20.0,
+        demand_kw=0.5,
+        coupled_heat_capacity=100.0,
+        coupled_loss_coeff=0.5,
+        coupled_min_temp=15.0,
+        coupled_max_temp=30.0,
+        coupling_coeff=2.0,
+        coupling_max_power=50.0,
+    )
+    # The feeder starts COLDER (25) than the coupled store (28): no uphill flow, but
+    # the DP must still find the do-nothing policy rather than declaring infeasible.
+    res = solve_thermal_dp(
+        np.full(8, 0.2), outdoor_temperature=10.0, params=params,
+        tank_start=25.0, coupled_start=28.0,
+    )
+    assert res.meta["infeasible"] is False
+    assert np.isfinite(res.total_cost)
