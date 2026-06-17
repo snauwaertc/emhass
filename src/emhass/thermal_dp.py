@@ -205,7 +205,16 @@ def solve_thermal_dp(
                     Tc2 = cgrid + (qxf - closs) / p.coupled_heat_capacity
                     feas_c = (Tc2 >= cgrid[0] - 1e-9) & (Tc2 <= cgrid[-1] + 1e-9)
                     Vnext = np.interp(Tc2, cgrid, V[j, :])
-                    xf_ok = qxf <= p.coupling_coeff * (grid[:, None] - cgrid[None, :]) * dt + 1e-9
+                    # Conductance limits the transfer to coupling_coeff*(T_from-T_to), but
+                    # clamp at 0: when the feeder is COLDER than the receiver heat cannot
+                    # flow uphill, yet transferring NOTHING (qxf=0) must always stay legal.
+                    # Without the clamp the bound goes negative and even qxf=0 is rejected,
+                    # making every state with a warmer coupled store spuriously infeasible.
+                    xf_ok = (
+                        qxf
+                        <= np.maximum(0.0, p.coupling_coeff * (grid[:, None] - cgrid[None, :])) * dt
+                        + 1e-9
+                    )
                     val = np.where(
                         feas_t[:, None] & feas_c[None, :] & xf_ok,
                         cost[:, None] + Vnext[None, :],
