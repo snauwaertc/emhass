@@ -3499,7 +3499,7 @@ class Optimization:
                 refined = True
                 self.logger.info(
                     "DP COP refinement on tank '%s': COP inconsistency %.2f > %.2f - "
-                    "re-optimised buffer to peak %.0f C, gas %.1f kWh",
+                    "re-optimised to peak %.0f C, gas %.1f kWh",
                     e["tank_id"],
                     max_err,
                     tol,
