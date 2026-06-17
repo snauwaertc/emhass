@@ -1932,6 +1932,10 @@ async def dayahead_forecast_optim(
     """
     _t0 = _time.monotonic()
     soc_init = input_data_dict["params"]["passed_data"].get("soc_init")
+    # Honour the already-incurred billing-period peak under a capacity tariff,
+    # same as the MPC path. Without this the dayahead solver treats the peak as 0
+    # and minimises the absolute import peak (flat grid), ignoring price arbitrage.
+    current_period_peak = input_data_dict["params"]["passed_data"].get("current_period_peak", None)
     logger.info(f"Performing day-ahead forecast optimization with soc_init: {soc_init}")
     # Prepare forecast data with costs, prices, outdoor temp, and GHI
     with stage_timer(input_data_dict["stage_times"], "price_prep", logger):
@@ -1946,6 +1950,7 @@ async def dayahead_forecast_optim(
             input_data_dict["p_pv_forecast"],
             input_data_dict["p_load_forecast"],
             soc_init=soc_init,
+            current_period_peak=current_period_peak,
             stage_times=input_data_dict["stage_times"],
         )
     # Save CSV file for publish_data

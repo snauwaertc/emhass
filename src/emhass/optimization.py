@@ -5492,6 +5492,7 @@ class Optimization:
         p_pv: pd.Series,
         p_load: pd.Series,
         soc_init: float | None = None,
+        current_period_peak: float | None = None,
         stage_times: dict[str, float] | None = None,
     ) -> pd.DataFrame:
         r"""
@@ -5506,6 +5507,13 @@ class Optimization:
         :param p_load: The forecasted Load power consumption. This power should \
             not include the power from the deferrable load that we want to find.
         :type p_load: pandas.DataFrame
+        :param current_period_peak: Optional peak grid import (in Watts) already \
+            incurred in the current billing period. When the capacity tariff \
+            (``capacity_cost_per_kw`` > 0) is active, the planned import peak is \
+            floored at this value, so importing up to the already-paid peak is free \
+            (only NEW peaks above it are priced). Mirrors the MPC path; without it \
+            the dayahead solver minimises the absolute peak and ignores the floor.
+        :type current_period_peak: float, optional
         :param stage_times: Optional dict to record nested sub-stage timings
             (``optim_solve.build`` / ``optim_solve.solve`` / ``optim_solve.extract``).
         :type stage_times: dict, optional
@@ -5528,6 +5536,7 @@ class Optimization:
             unit_load_cost,
             unit_prod_price,
             soc_init=soc_init,
+            current_period_peak=current_period_peak,
             stage_times=stage_times,
         )
         return self.opt_res

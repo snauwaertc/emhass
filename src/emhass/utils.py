@@ -1915,7 +1915,12 @@ async def treat_runtimeparams(
                 if "soc_target_timestep" in runtimeparams
                 else None
             )
-            params["passed_data"]["current_period_peak"] = None
+            # Capacity-tariff peak floor applies to dayahead/perfect too, not just
+            # MPC: read it here as well so the dayahead solver honours the already
+            # incurred billing-period peak instead of minimising the absolute peak.
+            params["passed_data"]["current_period_peak"] = runtimeparams.get(
+                "current_period_peak", None
+            )
 
         # Parsing the thermal model parameters
         # Load the default config
