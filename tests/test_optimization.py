@@ -3683,6 +3683,84 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(buf["coupled"], "pool should be detected as the coupled store")
         self.assertGreater(buf["coupled"]["heat_capacity"], 50)
 
+    def test_dp_cop_refinement_engages_on_drainable_coupled_pool(self):
+        """The coupled DP must use the pool's RAW min as its hard floor (like the LP),
+        not desired-1. With desired-1 it was stricter than the LP and declared the
+        coupled buffer+pool infeasible - skipping COP refinement entirely - on a leaky
+        pool the LP happily solves by letting it drain. With the raw floor the DP stays
+        feasible and ENGAGES, pricing the buffer COP rather than reverting to the
+        conservative skip cap."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [5.0] * 48
+        self._setup_single_hp(nominal=8000)
+        # Heating curve caps supply at 45 C, but the source can be driven to 70 C -
+        # exactly the gap the static COP fails to price.
+        self.optim_conf["def_load_config"] = [
+            {
+                "thermal_source": {
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 30,
+                        "min_supply": 25,
+                        "max_supply": 45,
+                    },
+                    "carnot_efficiency": 0.45,
+                    "max_supply_temperature": 70,
+                }
+            },
+        ]
+        # Buffer free to bank to 70; a leaky pool (high loss, tight band, heavy penalty)
+        # whose demand the coupling cannot meet, so the coupled DP is infeasible -> skip.
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "buffer",
+                "load_ids": [0],
+                "thermal_mass": 3.0,
+                "loss_coefficient": 0.2,
+                "start_temperature": 35.0,
+                "min_temperatures": [30.0] * 48,
+                "max_temperatures": [70.0] * 48,
+            },
+            {
+                "id": "pool",
+                "load_ids": [],
+                "thermal_mass": 100.0,
+                "loss_coefficient": 3.0,
+                "start_temperature": 27.0,
+                "min_temperatures": [16.0] * 48,  # drainable: full LP stays feasible
+                "max_temperatures": [30.0] * 48,
+                "desired_temperatures": [27.0] * 48,  # but the DP tries to hold it here
+                "penalty_factor": 30,
+            },
+        ]
+        self.optim_conf["tank_transfers"] = [
+            {
+                "from": "buffer",
+                "to": "pool",
+                "transfer_coefficient": 2.0,
+                "max_transfer_power": 20000,
+            },
+        ]
+        self.optim_conf["cop_solver"] = "auto"
+        opt = self.create_optimization()
+        cheap = np.full(48, 0.05)  # cheap throughout: would bank the buffer hot on a fake COP
+        with self.assertLogs(level="INFO") as cm:
+            res = opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                cheap,
+                np.full(48, 0.02),
+            )
+        self.assertIn("Optimal", str(res["optim_status"].iloc[0]))
+        log = "\n".join(cm.output)
+        # The DP must ENGAGE (refine) on the drainable pool, NOT skip with the cap.
+        self.assertIn("DP COP refinement on tank 'buffer'", log)
+        self.assertNotIn("cannot refine", log)
+        # And having priced the real COP, it does not bank the buffer to its 70 C max.
+        buf_col = next(c for c in res.columns if "predicted_temp_heater" in c)
+        self.assertLess(float(res[buf_col].to_numpy().max()), 65.0)
+
     def test_shared_tank_building_zone_state_dependent_loss(self):
         """Unified thermal tank (issue #539): a storage with thermal_mass +
         loss_coefficient behaves as a building thermal mass - the temperature is a

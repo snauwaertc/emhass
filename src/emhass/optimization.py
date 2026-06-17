@@ -3177,8 +3177,8 @@ class Optimization:
                     break
             # Optional coupled store: the largest-capacity tank this tank feeds (e.g. a
             # pool). The DP refines the two jointly so super-heating accounts for what
-            # the coupled store can bank. Its comfort floor is desired-1 C (not the raw
-            # min) so the DP keeps it near target rather than parking it at the floor.
+            # the coupled store can bank. Its hard floor is the raw min (see below) so
+            # the DP stays as feasible as the LP; comfort toward target is left to the LP.
             coupled = None
             for tr in self._get_tank_transfers() if transfer_vars else []:
                 if tr["from"] != tank_id:
@@ -3206,12 +3206,18 @@ class Optimization:
                 des_v = min(np.atleast_1d(des)) if des is not None else None
                 cmins = [v for v in (tgt.get("min_temperatures") or []) if v is not None]
                 cmaxs = [v for v in (tgt.get("max_temperatures") or []) if v is not None]
+                # Hard floor = the coupled store's RAW min, matching the LP's hard
+                # constraint. Using desired-1 here (to keep the pool near target) makes
+                # the coupled DP STRICTER than the LP, so it declares infeasible - and
+                # skips COP refinement entirely - on configs the LP solves by letting the
+                # pool drain softly. Comfort toward `desired` is still enforced by the LP
+                # re-solve; the DP only needs the true bankable capacity (down to min).
                 floor = (
-                    (float(des_v) - 1.0)
-                    if des_v is not None
+                    float(min(cmins))
+                    if cmins
                     else (
-                        float(min(cmins))
-                        if cmins
+                        (float(des_v) - 1.0)
+                        if des_v is not None
                         else float(tgt.get("start_temperature", 26.0)) - 1.0
                     )
                 )
