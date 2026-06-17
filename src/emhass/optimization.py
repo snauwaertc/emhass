@@ -3400,13 +3400,25 @@ class Optimization:
                     coupled_start=(coupled["start_temperature"] if coupled else 26.5),
                 )
                 if res.meta.get("infeasible"):
-                    # Demand exceeds what the heat pump and backup can deliver every step:
-                    # the DP has no feasible trajectory, so do not correct the COP from a
-                    # meaningless plan - keep this tank's static COP.
+                    # The DP found no feasible trajectory, so it cannot refine this
+                    # tank's COP. Falling back to the RAW static COP is optimistic: that
+                    # COP is computed at the heating-curve supply, so it does not
+                    # penalise driving the tank ABOVE that supply (where the real COP is
+                    # far lower) - which lets the solver bank heat into the un-priced
+                    # high-temperature region. Keep the static COP but conservatively cap
+                    # the tank at the temperature that COP is valid for - the curve's max
+                    # supply minus the heat-exchanger approach - so it cannot be driven
+                    # into the optimistic region the DP would otherwise have priced down.
+                    src_cfg = self._get_load_source_config(hp["load_idx"])
+                    curve = src_cfg.get("heating_curve") or {}
+                    valid_temp = float(curve.get("max_supply", 70.0)) - float(hp["approach"])
+                    extra_constraints.append(e["predicted_temp"][1:] <= valid_temp + 1.0)
                     self.logger.warning(
-                        "DP COP solver: tank '%s' demand exceeds deliverable heat - "
-                        "skipping its refinement, keeping the static COP",
+                        "DP COP solver: tank '%s' demand exceeds deliverable heat - cannot "
+                        "refine; capping it at %.0f C (the static-COP-valid temperature) "
+                        "instead of trusting the optimistic static COP",
                         e["tank_id"],
+                        valid_temp,
                     )
                     continue
                 traj = np.asarray(res.tank_trajectory, dtype=float)  # length n + 1
@@ -3436,7 +3448,9 @@ class Optimization:
                     exc,
                 )
                 continue
-        if not refined:
+        # Re-solve if any tank was refined OR a conservative cap was added for a tank
+        # the DP could not refine (the cap must be applied to take effect).
+        if not refined and not extra_constraints:
             return
         prob2 = cp.Problem(self.prob.objective, self.prob.constraints + extra_constraints)
         try:
