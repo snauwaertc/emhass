@@ -3222,6 +3222,7 @@ class Optimization:
                     )
                 )
                 coupled = {
+                    "to": tr["to"],
                     "heat_capacity": hc,
                     "loss_coefficient": float(tgt.get("loss_coefficient") or 0.0),
                     "min_temp": floor,
@@ -3233,9 +3234,41 @@ class Optimization:
                     "coupling_max_power": float(tr.get("max_transfer_power", 20000.0)),
                     "q_var": transfer_vars.get((tr["from"], tr["to"])),
                 }
+            # Non-coupled receivers: every OTHER downstream store this tank feeds (the
+            # coupled store above is excluded). At refinement time their draw on this tank
+            # is replaced by their own comfort need (the loss to hold their target), not
+            # the realised transfer - which scales with this tank's banked temperature and
+            # would poison the DP's demand. See docs/dp_cop_demand_decoupling.md.
+            coupled_to = coupled["to"] if coupled is not None else None
+            non_coupled_receivers = []
+            for tr in self._get_tank_transfers() if transfer_vars else []:
+                if tr["from"] != tank_id or tr["to"] == coupled_to:
+                    continue
+                rq = transfer_vars.get((tr["from"], tr["to"]))
+                if rq is None:
+                    continue
+                rtgt = next(
+                    (s for s in self._get_shared_thermal_tanks() if s.get("id") == tr["to"]), None
+                )
+                if rtgt is None:
+                    continue
+                rdes = rtgt.get("desired_temperatures")
+                rdes_v = (
+                    float(np.mean(np.atleast_1d(rdes)))
+                    if rdes is not None
+                    else float(rtgt.get("start_temperature", 20.0))
+                )
+                non_coupled_receivers.append(
+                    {
+                        "q_var": rq,
+                        "loss_coefficient": float(rtgt.get("loss_coefficient") or 0.0),
+                        "desired": rdes_v,
+                    }
+                )
             self._dp_tank_entries.append(
                 {
                     "coupled": coupled,
+                    "non_coupled_receivers": non_coupled_receivers,
                     "tank_id": tank_id,
                     "predicted_temp": predicted_temp,
                     "conversion": float(conversion),
@@ -3360,6 +3393,24 @@ class Optimization:
                     pool_xfer = np.asarray(coupled["q_var"].value, dtype=float) * dt
                     m = min(len(xfer_val), len(pool_xfer))
                     ext[:m] -= pool_xfer[:m]
+                # Non-coupled receivers (e.g. the house): the realised transfer folded into
+                # `ext` was inflated by the first solve banking this tank hot. Swap it for
+                # the receiver's own comfort need (loss to hold its target), which does NOT
+                # depend on this tank's temperature - so the DP is not poisoned by the very
+                # over-banking it exists to correct. See docs/dp_cop_demand_decoupling.md.
+                outdoor_full = np.asarray(e["outdoor"], dtype=float)[:n]
+                for rcv in e.get("non_coupled_receivers", []):
+                    if rcv.get("q_var") is None:
+                        continue
+                    realised = np.asarray(rcv["q_var"].value, dtype=float) * dt
+                    mb = min(len(ext), len(realised))
+                    ext[:mb] -= realised[:mb]  # back out the banking-inflated realised flow
+                    need = (
+                        np.maximum(rcv["loss_coefficient"] * (rcv["desired"] - outdoor_full), 0.0)
+                        * dt
+                    )
+                    mn = min(len(ext), len(need))
+                    ext[:mn] += need[:mn]  # add the receiver's true comfort demand
                 demand_kw = np.maximum(ext, 0.0) / dt
                 outdoor_arr = np.asarray(e["outdoor"], dtype=float)[:n]
                 outdoor_ref = float(np.mean(outdoor_arr))
@@ -3435,8 +3486,16 @@ class Optimization:
                 hp["cop_param"].value = utils.cop_from_tank_temperature(
                     end_temp, hp["carnot"], outdoor_arr, approach=hp["approach"]
                 )
+                # Cap the re-solve at the DP's peak, but never below the temperature the
+                # static COP is valid for: if the DP under-scheduled (a thin demand
+                # estimate), the re-solve must still keep that curve-valid headroom to
+                # serve a demand spike, instead of going infeasible and reverting to the
+                # over-banked first solve. Super-heating above it (peak > valid) stays free.
+                src_cfg = self._get_load_source_config(hp["load_idx"])
+                curve = src_cfg.get("heating_curve") or {}
+                valid_temp = float(curve.get("max_supply", 70.0)) - float(hp["approach"])
                 peak = float(traj[:n].max())
-                extra_constraints.append(e["predicted_temp"] <= peak + 1.0)
+                extra_constraints.append(e["predicted_temp"] <= max(peak, valid_temp) + 1.0)
                 refined = True
                 self.logger.info(
                     "DP COP refinement on tank '%s': COP inconsistency %.2f > %.2f - "

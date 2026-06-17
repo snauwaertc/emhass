@@ -1,7 +1,15 @@
-# Follow-up: decouple the DP COP refinement's demand from the first solve
+# DP COP refinement: decoupling the demand from the first solve
 
-Status: scoped, not yet implemented. Branch-local design note (remove or convert to
-an upstream issue before the heat-topology PRs land).
+Status: **implemented** on this branch. Kept as a design record.
+
+Implementing it surfaced a SECOND, independent bug that also kept the DP from
+engaging: the coupled-store transfer-feasibility check (`thermal_dp.py`) bounded the
+transfer at `coupling_coeff * (T_from - T_to)` without clamping at 0. When the feeder
+starts COLDER than the coupled store (the buffer below the pool's temperature), that
+bound is negative, so even "transfer nothing" (`qxf = 0`) is rejected and every such
+state is spuriously infeasible. Fixed by clamping the bound at 0 (heat cannot flow
+uphill, but coasting is always legal). With both fixes the DP engages on the real
+topology and prices the COP instead of falling back to the cap.
 
 ## Problem
 

@@ -3761,6 +3761,100 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         buf_col = next(c for c in res.columns if "predicted_temp_heater" in c)
         self.assertLess(float(res[buf_col].to_numpy().max()), 65.0)
 
+    def test_dp_cop_refinement_decouples_non_coupled_receiver(self):
+        """A buffer feeding a coupled pool AND a non-coupled house: the house's draw on
+        the buffer must be the house's own comfort need, NOT the realised transfer (which
+        is inflated when the first solve banks the buffer hot, and would poison the DP's
+        demand). The house must be registered as a non-coupled receiver and the DP must
+        engage (refine), not skip. The pool also starts warmer than the buffer, exercising
+        the uphill-transfer fix (a cold feeder must still coast a warmer coupled store)."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [5.0] * 48
+        self._setup_single_hp(nominal=8000)
+        self.optim_conf["def_load_config"] = [
+            {
+                "thermal_source": {
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 30,
+                        "min_supply": 25,
+                        "max_supply": 45,
+                    },
+                    "carnot_efficiency": 0.45,
+                    "max_supply_temperature": 70,
+                }
+            },
+        ]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "buffer",
+                "load_ids": [0],
+                "thermal_mass": 3.0,
+                "loss_coefficient": 0.2,
+                "start_temperature": 26.0,
+                "min_temperatures": [25.0] * 48,
+                "max_temperatures": [70.0] * 48,
+            },
+            {
+                "id": "pool",
+                "load_ids": [],
+                "thermal_mass": 100.0,
+                "loss_coefficient": 0.5,
+                "start_temperature": 28.0,  # warmer than the buffer -> uphill case
+                "min_temperatures": [15.0] * 48,
+                "max_temperatures": [30.0] * 48,
+                "desired_temperatures": [27.0] * 48,
+                "penalty_factor": 10,
+            },
+            {
+                "id": "house",
+                "load_ids": [],
+                "thermal_mass": 10.0,  # < 20 -> non-coupled receiver
+                "loss_coefficient": 0.35,
+                "start_temperature": 20.0,
+                "min_temperatures": [19.0] * 48,
+                "max_temperatures": [22.0] * 48,
+                "desired_temperatures": [20.5] * 48,
+                "penalty_factor": 20,
+            },
+        ]
+        self.optim_conf["tank_transfers"] = [
+            {
+                "from": "buffer",
+                "to": "pool",
+                "transfer_coefficient": 2.0,
+                "max_transfer_power": 20000,
+            },
+            {
+                "from": "buffer",
+                "to": "house",
+                "transfer_coefficient": 0.7,
+                "max_transfer_power": 20000,
+            },
+        ]
+        self.optim_conf["cop_solver"] = "auto"
+        # Three tanks + the DP is heavier than the 2-tank DP tests; a small MIP gap keeps
+        # the re-solve tractable (gap=0 here times out - not what this test is about).
+        self.optim_conf["lp_solver_mip_rel_gap"] = 0.05
+        opt = self.create_optimization()
+        with self.assertLogs(level="INFO") as cm:
+            res = opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                np.full(48, 0.10),
+                np.full(48, 0.02),
+            )
+        self.assertIn("Optimal", str(res["optim_status"].iloc[0]))
+        buf = next(e for e in opt._dp_tank_entries if e["tank_id"] == "buffer")
+        self.assertEqual(buf["coupled"]["to"], "pool")
+        self.assertTrue(
+            buf["non_coupled_receivers"], "house should be registered as a non-coupled receiver"
+        )
+        log = "\n".join(cm.output)
+        self.assertIn("DP COP refinement on tank 'buffer'", log)
+        self.assertNotIn("cannot refine", log)
+
     def test_shared_tank_building_zone_state_dependent_loss(self):
         """Unified thermal tank (issue #539): a storage with thermal_mass +
         loss_coefficient behaves as a building thermal mass - the temperature is a
