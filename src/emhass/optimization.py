@@ -3518,6 +3518,13 @@ class Optimization:
         if not refined and not extra_constraints:
             return
         prob2 = cp.Problem(self.prob.objective, self.prob.constraints + extra_constraints)
+        # prob2 shares the static solve's CVXPY variables, so prob2.solve() OVERWRITES
+        # their .value - and CVXPY nulls every variable to None on an infeasible/failed
+        # solve. self.prob.value stays cached-good (so the downstream status guard would
+        # NOT catch it), yet the published plan is read from the variables' .value, which
+        # would then be None: a silently corrupted/empty plan. Snapshot the good static
+        # values and restore them whenever the re-solve is rejected.
+        saved_values = [(v, v.value) for v in self.prob.variables()]
         try:
             prob2.solve(solver=selected_solver, warm_start=True, **solver_opts)
             # Only accept the re-solve if it is genuinely good. A timed-out re-solve
@@ -3533,10 +3540,14 @@ class Optimization:
             if prob2.value is not None and not bad_status:
                 self.prob = prob2
             else:
+                for v, val in saved_values:
+                    v.value = val
                 self.logger.warning(
                     "DP COP refinement re-solve status %s; keeping static solve", prob2.status
                 )
         except Exception as exc:
+            for v, val in saved_values:
+                v.value = val
             self.logger.warning("DP COP refinement re-solve failed (%s); keeping static solve", exc)
 
     def _add_deferrable_load_constraints(

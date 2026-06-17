@@ -3855,6 +3855,71 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DP COP refinement on tank 'buffer'", log)
         self.assertNotIn("cannot refine", log)
 
+    def test_dp_resolve_rejection_preserves_static_plan(self):
+        """Coverage for the rejected-DP-re-solve path: the published plan must stay
+        valid (not nulled) when the refinement re-solve is rejected. prob2 shares the
+        static solve's CVXPY variables; on a rejected solve a pure-LP re-solve nulls
+        them while self.prob.value stays cached-good, so the downstream status guard
+        would miss it and the plan would be silently None. The snapshot/restore in
+        _refine_cop_with_dp makes plan-preservation independent of whether the solver
+        nulls the shared variables on the rejected solve. Construct the rejection: an
+        optimistic low-supply curve (valid_temp = 35 C) on a tank pinned ABOVE it
+        (min 45 C). The static solve holds the tank with the optimistic COP; the DP,
+        pricing the true (much lower) COP, cannot deliver the heavy draw and flags
+        infeasible, so it caps the tank at valid_temp+1 = 36 C; that cap conflicts with
+        the 45 C floor, the re-solve is infeasible/rejected, and the static plan must
+        survive intact."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [5.0] * 48
+        self._setup_single_hp(nominal=1500)
+        self.optim_conf["def_load_config"] = [
+            {
+                "thermal_source": {
+                    # Optimistic low-supply curve; NO max_supply_temperature, so the
+                    # static solve can drive the tank above the curve supply (which is
+                    # exactly what makes its COP optimistic). valid_temp = 40 - 5 = 35 C.
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 30,
+                        "min_supply": 25,
+                        "max_supply": 40,
+                    },
+                    "carnot_efficiency": 0.45,
+                }
+            },
+        ]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "buffer",
+                "load_ids": [0],
+                "thermal_mass": 3.0,
+                "loss_coefficient": 0.02,
+                "start_temperature": 45.0,  # at the floor: no stored heat to drain
+                "min_temperatures": [45.0] * 48,  # ABOVE valid_temp -> the cap is infeasible
+                "max_temperatures": [60.0] * 48,
+                # 3 kWh/step (6 kW): the optimistic-COP static solve (~9.6 kW) can serve
+                # it, but the true-COP DP at 45 C (~4.9 kW) cannot -> DP infeasible.
+                "draw_off_demand": [3.0] * 48,
+            }
+        ]
+        self.optim_conf["cop_solver"] = "auto"
+        opt = self.create_optimization()
+        with self.assertLogs(level="INFO") as cm:
+            res = opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                np.full(48, 0.10),
+                np.full(48, 0.02),
+            )
+        log = "\n".join(cm.output)
+        # The re-solve must actually have been rejected (otherwise the path is untested).
+        self.assertIn("keeping static solve", log)
+        # ...and the published plan must be intact, not nulled by the rejected re-solve.
+        self.assertTrue(res["P_grid"].notna().all(), "rejected re-solve nulled the plan")
+        buf_col = next(c for c in res.columns if "predicted_temp_heater" in c)
+        self.assertTrue(np.isfinite(res[buf_col].to_numpy()).all())
+
     def test_shared_tank_building_zone_state_dependent_loss(self):
         """Unified thermal tank (issue #539): a storage with thermal_mass +
         loss_coefficient behaves as a building thermal mass - the temperature is a
