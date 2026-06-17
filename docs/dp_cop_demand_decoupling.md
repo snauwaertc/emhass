@@ -32,15 +32,33 @@ input is poisoned by the solve it is meant to correct.
 
 In the demand-assembly block of `_refine_cop_with_dp`, for each **non-coupled** outgoing
 transfer, replace the realised transfer with the receiver's own heat need, which is
-independent of the buffer temperature:
+independent of the buffer temperature. The full need would be:
 
 ```
-substituted = max(0, loss_coef * (desired - outdoor) - solar_gain + draw_off)
+full = max(0, loss_coef * (desired - outdoor) - solar_gain + draw_off)
 ```
+
+The implementation keeps only the **standing-loss** term:
+
+```
+substituted = max(0, loss_coef * (desired - outdoor)) * dt
+```
+
+This is the dominant term for the comfort-zone receivers this fix targets (a building
+zone has neither draw-off nor solar). The two omitted terms pull in opposite directions:
+dropping `solar_gain` **overstates** the need (conservative - the DP keeps the buffer
+warmer than strictly needed), while dropping `draw_off` would **understate** it for a
+receiver with a hot-water draw. Guard 2 below (the re-solve falls back to the
+conservative cap, never to the over-banked first solve) catches any under-scheduling, so
+the loss-only term stays safe. A receiver with significant draw-off or solar would be
+better modelled as a coupled state in the main MILP (see "Out of scope" below).
 
 Use `desired` (not `min`) as the comfort temperature: this slightly **overstates** the
 need, so the DP keeps the buffer warm enough to coast the receiver through its comfort
-band - the conservative direction, never under-serving.
+band - the conservative direction, never under-serving. The per-step desired profile is
+collapsed to its horizon mean when substituted, so a stepped/setback receiver target is
+flattened (acceptable for the loss-maintenance approximation; a receiver whose schedule
+shape matters belongs in the main MILP).
 
 ### Guard 1 - avoid double-counting (correctness)
 
