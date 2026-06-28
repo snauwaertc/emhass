@@ -44,6 +44,35 @@ def test_dp_prefers_heat_pump_when_genuinely_cheaper():
     assert backup_kwh < 0.10 * hp_kwh  # backup is negligible when the HP clearly wins
 
 
+def test_dp_cop_clamps_high_when_outdoor_above_supply():
+    """Sign-bug regression: when it is warmer outside than the condenser supply (a
+    low-temperature store on a hot day, so the temperature lift is <= 0), the heat
+    pump is maximally efficient and the COP must clamp to the UPPER bound - not
+    collapse to 1.0. A negative Carnot denominator previously clipped to cop_bounds[0]
+    (resistive), which under-valued the HP in warm weather. We recover the effective
+    COP from the energy balance (heat delivered / electricity drawn)."""
+    params = ThermalDPParams(
+        heat_capacity=2.0,
+        loss_coeff=0.0,
+        min_temp=25.0,
+        max_temp=30.0,
+        hx_approach=5.0,        # supply = tank + 5 = 30..35 C
+        hp_max_power=3.0,
+        backup_max_power=0.0,   # only the HP can meet the demand
+        demand_kw=2.0,
+        cop_bounds=(1.0, 8.0),
+    )
+    n = 12
+    # Outdoor (40 C) is hotter than every supply temperature -> lift <= 0 everywhere.
+    res = solve_thermal_dp(np.full(n, 0.20), outdoor_temperature=40.0, params=params)
+    traj = res.tank_trajectory
+    heat_delivered = params.demand_kw * 0.5 * n + params.heat_capacity * (traj[-1] - traj[0])
+    hp_elec = float(np.sum(res.hp_electric_per_step) * 0.5)
+    assert hp_elec > 0, "the HP must run to meet the demand"
+    eff_cop = heat_delivered / hp_elec
+    assert eff_cop > 4.0, f"effective COP {eff_cop:.2f} - sign bug clipped to the floor"
+
+
 def test_dp_solves_quickly():
     """The 2-state DP must be fast enough to live inside the optimisation loop."""
     params = ThermalDPParams(
