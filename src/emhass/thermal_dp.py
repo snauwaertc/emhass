@@ -144,9 +144,14 @@ def solve_thermal_dp(
     # (it prices a large heating step at its true cost). cop2d[t, j] evaluates the target
     # supply against step t's outdoor temperature, so an intraday swing is still captured.
     supply = grid + p.hx_approach  # (nt,) condenser supply needed to reach each target temp
+    # Carnot heating COP = carnot_eff * T_supply / (T_supply - T_outdoor). A vanishing or
+    # negative temperature lift (outdoor >= supply: a low-temperature store on a hot day)
+    # is the maximally-efficient / free-heat regime, so it must clamp to the UPPER bound -
+    # a negative Carnot denominator must NOT clip to the resistive floor (cop_bounds[0]).
+    lift = supply[None, :] - outdoor_arr[:, None]  # (N, nt) condenser - source
+    carnot = p.carnot_efficiency * (supply[None, :] + 273.15) / np.where(lift > 1e-6, lift, 1e-6)
     cop2d = np.clip(
-        p.carnot_efficiency * (supply[None, :] + 273.15) / (supply[None, :] - outdoor_arr[:, None]),
-        *p.cop_bounds,
+        np.where(lift > 1e-6, carnot, p.cop_bounds[1]), *p.cop_bounds
     )  # (N, nt): cop2d[t, j] = COP to charge to grid[j] at step t
     hp_cap_th = p.hp_max_power * cop2d * dt  # (N, nt) thermal kWh the HP delivers reaching j
     qin_max = (p.hp_max_power * cop2d + p.backup_max_power * p.backup_efficiency) * dt  # (N, nt)
