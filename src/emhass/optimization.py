@@ -4138,6 +4138,10 @@ class Optimization:
                 constraints.append(q_var <= k_xfer * (t_from - t_to) + big_m_xfer * (1 - xfer_on))
                 constraints.append(q_var <= qmax * xfer_on)
 
+        # Expose the per-flow pump decisions so the results frame can surface them
+        # after the solve (read via q_var.value in _build_results_dataframe).
+        self.transfer_vars = transfer_vars
+
         return predicted_temps, heating_demands, penalty_terms_total, q_inputs
 
     def _add_deferrable_group_constraints(self, constraints, relaxed=False):
@@ -4245,6 +4249,11 @@ class Optimization:
             p_def_k = get_val(self.vars["p_deferrable"][k])
             opt_tp[f"P_deferrable{k}"] = p_def_k
             p_def_sum += p_def_k
+
+        # Tank-to-tank transfers (modulated pump flows): one additive column per
+        # flow, in W to match the other power columns - the actionable pump schedule.
+        for (frm, to), q_var in getattr(self, "transfer_vars", {}).items():
+            opt_tp[f"P_transfer_{frm}_{to}"] = get_val(q_var) * 1000.0  # kW -> W
 
         # Battery Results
         if self.optim_conf["set_use_battery"]:
@@ -4375,6 +4384,19 @@ class Optimization:
                 opt_tp[f"P_def_bin2_{k}"] = get_val(self.vars["p_def_bin2"][k])
 
         return opt_tp
+
+    @staticmethod
+    def _needs_relaxed_retry(status, value) -> bool:
+        """Decide whether to discard a solve and retry with the binary-relaxed LP.
+
+        A ``user_limit`` status means the MILP solver hit its time limit, but it almost
+        always carries a feasible (near-optimal) incumbent - which is BETTER than the
+        relaxed LP fallback (that fallback drops the semi-continuous binaries, so it can
+        run a min-power source below its physical floor). Accept that incumbent; only
+        fall back when the solve is genuinely unusable: an infeasible/unbounded/None
+        status, or no incumbent objective value at all.
+        """
+        return status in ("infeasible", "unbounded", None) or value is None
 
     def perform_optimization(
         self,
@@ -5358,13 +5380,19 @@ class Optimization:
         except Exception as exc:
             self.logger.warning("DP COP refinement skipped (%s)", exc)
 
-        # Check for failure or "bad" status
-        # Note: "user_limit" often means timeout. "infeasible" means configuration conflict.
-        fail_statuses = ["infeasible", "unbounded", "user_limit", None]
-        if self.prob.status in fail_statuses or self.prob.value is None:
+        # Check for failure or "bad" status. A 'user_limit' (time-limited) solve that
+        # still carries a feasible incumbent is accepted, not discarded for the
+        # binary-relaxed LP fallback - see _needs_relaxed_retry.
+        if self._needs_relaxed_retry(self.prob.status, self.prob.value):
             self.logger.warning(
                 f"Optimization failed with status: '{self.prob.status}'. "
                 "Retrying with relaxed constraints (Continuous LP)..."
+            )
+        elif self.prob.status == "user_limit":
+            self.logger.info(
+                "Accepting time-limited solution (objective %.4g) - feasible incumbent, "
+                "skipping the relaxed LP fallback.",
+                self.prob.value,
             )
 
             # Backup Configuration

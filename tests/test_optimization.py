@@ -3855,6 +3855,79 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DP COP refinement on tank 'buffer'", log)
         self.assertNotIn("cannot refine", log)
 
+    def test_tank_transfer_pump_flows_surfaced_in_results(self):
+        """The modulated buffer->house pump flow is surfaced as an additive output
+        column P_transfer_<from>_<to> (W) - the actionable pump schedule. It must be
+        present, finite, non-negative, within max_transfer_power, and actually run
+        (the cold house loses heat and can only be held by the transfer)."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [5.0] * 48
+        self._setup_single_hp(nominal=8000)
+        self.optim_conf["def_load_config"] = [
+            {
+                "thermal_source": {
+                    "heating_curve": {"slope": 0.7, "offset": 30, "min_supply": 25, "max_supply": 45},
+                    "carnot_efficiency": 0.45,
+                    "max_supply_temperature": 70,
+                }
+            },
+        ]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "buffer",
+                "load_ids": [0],
+                "thermal_mass": 3.0,
+                "loss_coefficient": 0.2,
+                "start_temperature": 40.0,  # warm feeder
+                "min_temperatures": [20.0] * 48,
+                "max_temperatures": [70.0] * 48,
+            },
+            {
+                "id": "house",
+                "load_ids": [],  # transfer-only receiver
+                "thermal_mass": 10.0,
+                "loss_coefficient": 0.35,
+                "start_temperature": 19.0,  # cold -> needs the pump to stay in band
+                "min_temperatures": [19.0] * 48,
+                "max_temperatures": [22.0] * 48,
+                "desired_temperatures": [20.5] * 48,
+                "penalty_factor": 20,
+            },
+        ]
+        self.optim_conf["tank_transfers"] = [
+            {"from": "buffer", "to": "house", "transfer_coefficient": 0.7, "max_transfer_power": 20000},
+        ]
+        self.optim_conf["cop_solver"] = "static"  # this test is about the output column, keep it light
+        opt = self.create_optimization()
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            np.full(48, 0.10),
+            np.full(48, 0.02),
+        )
+        self.assertIn("Optimal", str(res["optim_status"].iloc[0]))
+        self.assertIn("P_transfer_buffer_house", res.columns)
+        flow = res["P_transfer_buffer_house"].to_numpy()
+        self.assertTrue(np.all(np.isfinite(flow)))
+        self.assertTrue(np.all(flow >= -1e-6), "pump flow must be non-negative")
+        self.assertTrue(np.all(flow <= 20000 + 1e-3), "pump flow within max_transfer_power")
+        self.assertGreater(flow.max(), 0.0, "the pump must run to hold the cold house")
+
+    def test_needs_relaxed_retry_accepts_time_limited_incumbent(self):
+        """A time-limited (user_limit) solve with a feasible incumbent must be accepted,
+        not discarded for the binary-relaxed LP fallback - that is the fix for the
+        chronic 400s where a good near-optimal MILP solution was thrown away. Genuinely
+        unusable solves (infeasible/unbounded/None, or no incumbent) still retry."""
+        needs = Optimization._needs_relaxed_retry
+        self.assertFalse(needs("user_limit", 12.3))  # incumbent present -> accept it
+        self.assertTrue(needs("user_limit", None))    # hit the limit, no solution -> retry
+        self.assertFalse(needs("optimal", 5.0))
+        self.assertTrue(needs("infeasible", None))
+        self.assertTrue(needs("infeasible", 5.0))     # infeasible always retries
+        self.assertTrue(needs("unbounded", None))
+        self.assertTrue(needs(None, None))
+
     def test_dp_resolve_rejection_preserves_static_plan(self):
         """Coverage for the rejected-DP-re-solve path: the published plan must stay
         valid (not nulled) when the refinement re-solve is rejected. prob2 shares the
