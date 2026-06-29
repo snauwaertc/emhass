@@ -4216,6 +4216,53 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             (buffer >= house - 0.1).all(), "transfer must respect the temperature gradient"
         )
 
+    def test_tank_transfer_missing_endpoint_forces_zero_and_warns(self):
+        """Bug A regression: a tank_transfers entry whose endpoint id has no shared
+        tank (so no temperature variable exists) must be forced to zero with a
+        WARNING - not left bounded only by 0 <= q <= max_power, which would let the
+        solver pump energy uphill (cold -> hot) with no gradient check."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
+        self._setup_single_hp(supply_temperature=45.0, nominal=4000)
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "buffer",
+                "load_ids": [0],
+                "volume": 0.1,
+                "start_temperature": 40.0,
+                "thermal_loss": 0.05,
+                "min_temperatures": [20.0] * 48,
+                "max_temperatures": [60.0] * 48,
+            }
+        ]
+        self.optim_conf["tank_transfers"] = [
+            {
+                "from": "buffer",
+                "to": "ghost",  # not in shared_thermal_tanks -> no temperature variable
+                "transfer_coefficient": 0.7,
+                "max_transfer_power": 20000,
+            }
+        ]
+        opt = self.create_optimization()
+        with self.assertLogs(opt.logger, level="WARNING") as cm:
+            res = opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                self.df_input_data_dayahead[opt.var_load_cost].values,
+                self.df_input_data_dayahead[opt.var_prod_price].values,
+            )
+        self.assertTrue(
+            any("ghost" in m for m in cm.output),
+            f"expected a WARNING naming the missing tank id; got {cm.output}",
+        )
+        self.assertIn("P_transfer_buffer_ghost", res.columns)
+        flow = res["P_transfer_buffer_ghost"].to_numpy()
+        self.assertTrue(
+            np.all(np.abs(flow) < 1e-3),
+            f"transfer to a missing tank must be zero; got max abs {np.abs(flow).max():.3f} W",
+        )
+
     def test_tank_to_tank_transfer_feasible_when_receiver_hotter(self):
         """Regression: a tank->tank transfer must stay feasible when the receiving
         tank starts hotter than the feeder. The gradient bound k*(from-to) goes

@@ -4148,6 +4148,24 @@ class Optimization:
                 big_m_xfer = k_xfer * SHARED_TANK_CAP_BIG_M_TEMP
                 constraints.append(q_var <= k_xfer * (t_from - t_to) + big_m_xfer * (1 - xfer_on))
                 constraints.append(q_var <= qmax * xfer_on)
+            else:
+                # One or both endpoint temperatures are absent (a tank id in
+                # tank_transfers that no shared tank produced a temperature variable
+                # for). Without both temperatures the hot->cold gradient guard cannot
+                # be built; leaving q bounded only by 0 <= q <= max_power would let the
+                # solver pump energy uphill (cold -> hot) with no thermodynamic check.
+                # Force the transfer to zero and warn rather than fail silently.
+                missing = [
+                    tid for tid, temp in ((tr["from"], t_from), (tr["to"], t_to)) if temp is None
+                ]
+                self.logger.warning(
+                    "tank_transfers entry %s->%s references tank id(s) %s with no shared-tank "
+                    "temperature variable; forcing this transfer to zero.",
+                    tr["from"],
+                    tr["to"],
+                    missing,
+                )
+                constraints.append(q_var == 0)
 
         # Expose the per-flow pump decisions so the results frame can surface them
         # after the solve (read via q_var.value in _build_results_dataframe).
