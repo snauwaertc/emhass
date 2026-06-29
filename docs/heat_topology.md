@@ -70,10 +70,23 @@ which drives the Carnot COP:
 - `heating_curve`: `{ "slope": .., "offset": .., "min_supply": 25, "max_supply": 70 }`
   (`slope` and `offset` required; weather-compensated supply temperature). Takes precedence
   if present.
-- or `supply_temperature`: a constant supply temperature (used when no `heating_curve`).
+- `cooling_curve` (cool-sense storage only): the same shape, with cooling defaults
+  `min_supply` 5, `max_supply` 18 - a weather-compensated *chilled* supply temperature for
+  a chiller. The cooling Carnot lift (`T_outdoor - T_supply`) is applied automatically for
+  a `cool` storage.
+- or `supply_temperature`: a constant supply temperature (used when no curve).
 - `carnot_efficiency`: COP efficiency factor, default `0.4`.
 
-A heat-pump source must provide one of `heating_curve` or `supply_temperature`.
+A heat-pump source must provide one of `heating_curve`, `cooling_curve`, or
+`supply_temperature`.
+
+> **Curve-driven sources are DP-refinable.** A `heating_curve` (or `cooling_curve`)
+> source's supply temperature - and hence its COP - tracks the temperature the storage
+> actually reaches, so the post-solve DP COP refinement (`cop_solver`) corrects it to the
+> globally-optimal trajectory. A constant `supply_temperature` source has a fixed COP and
+> keeps its exact static value. For cooling the DP runs in cooling mode (the chiller
+> removes heat, charging the store *colder*); a cool storage with a coupled store is not
+> yet DP-refined and keeps its static COP.
 
 > **`supply_temperature` drives the COP only - it is not a physical ceiling.**
 > A constant-supply heat pump cannot heat water above its supply temperature, but
@@ -411,8 +424,8 @@ The compiler fails fast with a `ValueError` naming the offending field when:
 - a source or storage `id` is duplicated;
 - a `flow.from` / `flow.to` does not match a source / storage `id`;
 - a `consumer.target` does not match a storage `id`;
-- a heat-pump source has neither `supply_temperature` nor `heating_curve`, or a
-  `heating_curve` is missing `slope` / `offset`;
+- a heat-pump source has none of `supply_temperature`, `heating_curve`, or
+  `cooling_curve`, or a `heating_curve` / `cooling_curve` is missing `slope` / `offset`;
 - a source `type` is not recognised;
 - a source `cost_track` is not present in `cost_tracks`;
 - a storage gets two `building_demand` consumers;
