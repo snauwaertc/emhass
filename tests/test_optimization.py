@@ -6674,12 +6674,14 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
                 def_end_timestep=def_end_timestep,
             )
 
-            # Assertions - accept both Optimal (MIP gap may help) and Optimal (Relaxed)
+            # Assertions - accept Optimal, Optimal (Relaxed) for an infeasible-MILP
+            # fallback, and Optimal (Incumbent) when this large 288-step horizon hits the
+            # solver time limit and the binary-respecting incumbent is accepted.
             status = opt_res["optim_status"].iloc[0]
             self.assertIn(
                 status,
-                ["Optimal", "Optimal (Relaxed)"],
-                f"Expected Optimal or Optimal (Relaxed), got {status}",
+                ["Optimal", "Optimal (Relaxed)", "Optimal (Incumbent)"],
+                f"Expected Optimal or a fallback/incumbent status, got {status}",
             )
 
             # Check Load 0

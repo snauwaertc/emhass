@@ -5388,12 +5388,6 @@ class Optimization:
                 f"Optimization failed with status: '{self.prob.status}'. "
                 "Retrying with relaxed constraints (Continuous LP)..."
             )
-        elif self.prob.status == "user_limit":
-            self.logger.info(
-                "Accepting time-limited solution (objective %.4g) - feasible incumbent, "
-                "skipping the relaxed LP fallback.",
-                self.prob.value,
-            )
 
             # Backup Configuration
             original_semi_cont = copy.deepcopy(
@@ -5476,6 +5470,16 @@ class Optimization:
             # 5. Restore Configuration
             self.optim_conf["treat_deferrable_load_as_semi_cont"] = original_semi_cont
             self.optim_conf["set_deferrable_load_single_constant"] = original_single_const
+        elif self.prob.status == "user_limit":
+            self.logger.info(
+                "Accepting time-limited solution (objective %.4g) - feasible incumbent, "
+                "skipping the relaxed LP fallback.",
+                self.prob.value,
+            )
+            # Mark it so the downstream status gate keeps this binary-respecting
+            # incumbent instead of discarding it (the relaxed LP would drop the
+            # semi-continuous/single-constant binaries, which is physically wrong).
+            self.prob._status = "Optimal (Incumbent)"
 
         # Stage-timer breadcrumb: end of solve phase, start of extract phase.
         _extract_start_perf = time.perf_counter() if stage_times is not None else 0.0
@@ -5491,6 +5495,7 @@ class Optimization:
             cp.OPTIMAL,
             cp.OPTIMAL_INACCURATE,
             "Optimal (Relaxed)",
+            "Optimal (Incumbent)",
         ]:
             self.logger.warning("Cost function cannot be evaluated or Infeasible/Unbounded")
 
