@@ -54,6 +54,11 @@ class ThermalDPParams:
     ambient_temperature: float = 20.0  # reference the standing loss is taken against
 
     # Heat pump charging the store, plus an optional flat-efficiency backup source.
+    # mode "heat": the unit ADDS heat, condenser runs at store_temp + approach, charging
+    # raises temperature. mode "cool": the unit REMOVES heat (chiller), evaporator runs at
+    # store_temp - approach, charging LOWERS temperature; the COP, standing-loss sign and
+    # charging direction all invert. Cool mode does not support a coupled store yet.
+    mode: str = "heat"  # "heat" | "cool"
     carnot_efficiency: float = 0.45
     hx_approach: float = 5.0  # condenser runs at store_temp + approach
     cop_bounds: tuple[float, float] = (1.0, 8.0)
@@ -114,6 +119,9 @@ def solve_thermal_dp(
     N = len(price)
     dt = time_step
     p = params
+    # Sense of the unit: +1 heat (adds heat; charging raises temperature), -1 cool
+    # (removes heat; charging lowers temperature). Flips the energy-balance / loss sign.
+    sc = -1.0 if p.mode == "cool" else 1.0
     outdoor_arr = (
         np.full(N, float(outdoor_temperature))
         if np.ndim(outdoor_temperature) == 0
@@ -143,12 +151,20 @@ def solve_thermal_dp(
     # both the physically faithful model for a setpoint-driven HP and the conservative one
     # (it prices a large heating step at its true cost). cop2d[t, j] evaluates the target
     # supply against step t's outdoor temperature, so an intraday swing is still captured.
-    supply = grid + p.hx_approach  # (nt,) condenser supply needed to reach each target temp
-    # Carnot heating COP = carnot_eff * T_supply / (T_supply - T_outdoor). A vanishing or
-    # negative temperature lift (outdoor >= supply: a low-temperature store on a hot day)
-    # is the maximally-efficient / free-heat regime, so it must clamp to the UPPER bound -
-    # a negative Carnot denominator must NOT clip to the resistive floor (cop_bounds[0]).
-    lift = supply[None, :] - outdoor_arr[:, None]  # (N, nt) condenser - source
+    # Supply temperature the unit runs at to reach target grid[j]. Heat: the condenser runs
+    # ABOVE the store (grid + approach). Cool: the evaporator runs BELOW the store
+    # (grid - approach) to extract heat. The Carnot COP pays for the lift between the hot and
+    # cold sides: condenser - outdoor (heat) or outdoor - evaporator (cool). A vanishing or
+    # negative lift (heat: outdoor >= supply, a low store on a hot day; cool: outdoor <=
+    # supply, a chilled store on a cold day) is the maximally-efficient / free regime, so it
+    # clamps to the UPPER bound - a negative Carnot denominator must NOT clip to the
+    # resistive floor (cop_bounds[0]).
+    if p.mode == "cool":
+        supply = grid - p.hx_approach  # (nt,) cold evaporator side
+        lift = outdoor_arr[:, None] - supply[None, :]  # (N, nt) outdoor - evaporator
+    else:
+        supply = grid + p.hx_approach  # (nt,) condenser supply needed to reach each target
+        lift = supply[None, :] - outdoor_arr[:, None]  # (N, nt) condenser - source
     carnot = p.carnot_efficiency * (supply[None, :] + 273.15) / np.where(lift > 1e-6, lift, 1e-6)
     cop2d = np.clip(
         np.where(lift > 1e-6, carnot, p.cop_bounds[1]), *p.cop_bounds
@@ -159,6 +175,11 @@ def solve_thermal_dp(
     cp_backup = p.backup_price / p.backup_efficiency
 
     use_coupled = p.coupled_heat_capacity is not None
+    if use_coupled and p.mode == "cool":
+        raise NotImplementedError(
+            "cool-mode thermal DP does not support a coupled store yet; "
+            "the optimizer keeps the static COP for cool tanks with coupling."
+        )
     if use_coupled:
         span = p.coupled_max_temp - p.coupled_min_temp
         if span > 0:
@@ -201,7 +222,11 @@ def solve_thermal_dp(
         best_j = np.zeros((nt, ncl), np.int16)
         best_q = np.zeros((nt, ncl), np.int16)
         for j in range(nt):
-            base = (grid[j] - grid) * p.heat_capacity + demand[t] * dt + loss
+            # Energy the unit must move to reach target j from each current state. Heat
+            # (sc=+1): Qin to ADD = (grid[j]-grid)*hc + demand + loss. Cool (sc=-1): Qin to
+            # REMOVE = (grid-grid[j])*hc + demand - loss, i.e. sc flips the temperature
+            # delta and the passive-loss term while the demand stays a positive load.
+            base = sc * (grid[j] - grid) * p.heat_capacity + demand[t] * dt + sc * loss
             for qi, qxf in enumerate(qxf_levels):
                 Qin = base + qxf
                 cost = cheapest(Qin, t, j)
@@ -250,7 +275,10 @@ def solve_thermal_dp(
     for t in range(N):
         j = int(POL[t, it, ic, 0])
         qxf = qxf_levels[int(POL[t, it, ic, 1])]
-        Qin = max(0.0, (grid[j] - grid[it]) * p.heat_capacity + demand[t] * dt + loss[it] + qxf)
+        Qin = max(
+            0.0,
+            sc * (grid[j] - grid[it]) * p.heat_capacity + demand[t] * dt + sc * loss[it] + qxf,
+        )
         cop_ij = cop2d[t, j]  # COP to reach the target temperature grid[j]
         if price[t] / cop_ij <= cp_backup:
             qhp = min(Qin, hp_cap_th[t, j])

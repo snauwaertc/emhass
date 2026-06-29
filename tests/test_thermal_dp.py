@@ -209,3 +209,57 @@ def test_dp_feasible_when_feeder_colder_than_coupled_store():
     )
     assert res.meta["infeasible"] is False
     assert np.isfinite(res.total_cost)
+
+
+def _cool_params(**over):
+    base = {
+        "mode": "cool",
+        "heat_capacity": 2.0,
+        "loss_coeff": 0.0,
+        "min_temp": 5.0,
+        "max_temp": 15.0,
+        "grid_step": 0.5,
+        "carnot_efficiency": 0.45,
+        "hx_approach": 5.0,
+        "cop_bounds": (1.0, 8.0),
+        "hp_max_power": 3.0,
+        "ambient_temperature": 30.0,
+        "demand_kw": 1.0,
+    }
+    base.update(over)
+    return ThermalDPParams(**base)
+
+
+def test_cool_mode_cools_against_demand():
+    """Cool mode: a chilled store with a steady cooling load is held in band by the
+    chiller removing heat (charging = lowering temperature), priced at the cooling
+    Carnot COP - not the heating COP. With no cooling it would warm past its max."""
+    res = solve_thermal_dp(np.full(24, 0.20), 30.0, _cool_params(), time_step=0.5, tank_start=10.0)
+    assert res.meta["infeasible"] is False
+    # The chiller must run to remove the steady load and hold the band.
+    assert res.hp_electric_per_step.sum() > 0
+    traj = res.tank_trajectory
+    assert traj.min() >= 5.0 - 0.6
+    assert traj.max() <= 15.0 + 0.6
+
+
+def test_cool_mode_super_cools_only_when_spread_pays():
+    """The cooling analog of heat banking: with a flat price the chiller cools lazily
+    and the store never dips below its start; with a big cheap/dear spread it banks COLD
+    during the cheap window (a markedly lower minimum) to coast the dear window."""
+    # Fine grid (0.1 C) so the steady demand can coast the store up between cheap
+    # windows; a coarse grid would pin warming below one grid step and forbid banking.
+    params = _cool_params(demand_kw=2.0, heat_capacity=5.0, grid_step=0.1)
+    flat = solve_thermal_dp(np.full(48, 0.20), 30.0, params, tank_start=10.0)
+    spread = solve_thermal_dp(_spread_price(), 30.0, params, tank_start=10.0)
+    assert spread.tank_trajectory.min() < flat.tank_trajectory.min() - 0.5
+
+
+def test_cool_mode_rejects_coupled_store():
+    """Cool mode does not yet support a coupled store; it must raise so the optimizer
+    falls back to the static COP instead of silently using heating-physics coupling."""
+    import pytest
+
+    params = _cool_params(coupled_heat_capacity=50.0)
+    with pytest.raises(NotImplementedError):
+        solve_thermal_dp(np.full(24, 0.2), 30.0, params, time_step=0.5, tank_start=10.0)
