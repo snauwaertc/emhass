@@ -2895,7 +2895,9 @@ class Optimization:
             # makes the static COP optimistic. A fixed supply_temperature source is
             # physically capped at its supply - its COP is constant by design and the
             # static value is already exact - so it is left as a constant array.
-            is_hp = src_cfg.get("efficiency") is None and bool(src_cfg.get("heating_curve"))
+            is_hp = src_cfg.get("efficiency") is None and bool(
+                src_cfg.get("heating_curve") or src_cfg.get("cooling_curve")
+            )
             if is_hp and dp_hp_info is None:
                 cop_param = cp.Parameter(
                     required_len, nonneg=True, value=cops, name=f"cop_{tank_id}_{k}"
@@ -2903,6 +2905,9 @@ class Optimization:
                 cop_arrays.append(cop_param)
                 dp_hp_info = {
                     "load_idx": k,
+                    "sense": utils.normalize_heat_cool_mode(
+                        src_cfg.get("sense") or "heat", field_name="sense", context="thermal_source"
+                    ),
                     "cop_param": cop_param,
                     "cop_static": cops,
                     "carnot": float(src_cfg.get("carnot_efficiency", 0.4)),
@@ -3161,14 +3166,11 @@ class Optimization:
         # (heating Carnot COP, tank-above-ambient standing loss), so refining a chilled
         # store would invert its plan. They keep the static COP - the LP temperature
         # dynamics already handle cooling correctly (sense_coeff flips the source term).
+        # A tank is registered for DP refinement when it has a curve-driven (refinable)
+        # heat-pump source - heating OR cooling. A fixed-supply source has a constant COP
+        # (is_hp is False above, so dp_hp_info stays None) and keeps its exact static COP.
         _dp_active = dp_hp_info is not None and self.optim_conf.get("cop_solver", "auto") != "static"
-        if _dp_active and sense_coeff < 0:
-            self.logger.info(
-                "Shared tank %s is cool-sense; skipping the heating-only DP COP "
-                "refinement and keeping the static COP.",
-                tank_id,
-            )
-        elif _dp_active:
+        if _dp_active:
             if not hasattr(self, "_dp_tank_entries"):
                 self._dp_tank_entries = []
             backup = None
@@ -3376,9 +3378,11 @@ class Optimization:
                 if temp is None:
                     continue
                 hp = e["hp"]
+                sense = hp.get("sense", "heat")
+                sense_sign = -1.0 if sense == "cool" else 1.0
                 cop_now = np.asarray(hp["cop_param"].value, dtype=float)
                 cop_consistent = utils.cop_from_tank_temperature(
-                    temp[:n], hp["carnot"], e["outdoor"][:n], approach=hp["approach"]
+                    temp[:n], hp["carnot"], e["outdoor"][:n], approach=hp["approach"], mode=sense
                 )
                 max_err = float(np.max(np.abs(cop_now - cop_consistent)))
                 if mode == "auto" and max_err <= tol:
@@ -3422,7 +3426,10 @@ class Optimization:
                     )
                     mn = min(len(ext), len(need))
                     ext[:mn] += need[:mn]  # add the receiver's true comfort demand
-                demand_kw = np.maximum(ext, 0.0) / dt
+                # ext is the LP heating_demand (signed): a positive heat draw for a heat
+                # tank, a negative signed gain for a cool tank. sense_sign maps either to a
+                # positive load magnitude the DP must serve (remove, in cool mode).
+                demand_kw = np.maximum(sense_sign * ext, 0.0) / dt
                 outdoor_arr = np.asarray(e["outdoor"], dtype=float)[:n]
                 outdoor_ref = float(np.mean(outdoor_arr))
                 backup = e["backup"]
@@ -3456,6 +3463,7 @@ class Optimization:
                     backup_max_power=(backup["nominal_power"] / 1000.0 if backup else 0.0),
                     backup_price=backup_price,
                     demand_kw=demand_kw,
+                    mode=sense,
                     ambient_temperature=outdoor_ref,  # EMHASS tanks lose to outdoor
                     **coupled_kwargs,
                 )
@@ -3477,6 +3485,14 @@ class Optimization:
                     # the tank at the temperature that COP is valid for - the curve's max
                     # supply minus the heat-exchanger approach - so it cannot be driven
                     # into the optimistic region the DP would otherwise have priced down.
+                    if sense == "cool":
+                        # Cool-mode DP infeasible (rare): keep the static cooling COP rather
+                        # than applying a heating-shaped temperature cap.
+                        self.logger.warning(
+                            "DP COP solver: cool tank '%s' DP infeasible - keeping its static COP",
+                            e["tank_id"],
+                        )
+                        continue
                     src_cfg = self._get_load_source_config(hp["load_idx"])
                     curve = src_cfg.get("heating_curve") or {}
                     valid_temp = float(curve.get("max_supply", 70.0)) - float(hp["approach"])
@@ -3495,26 +3511,31 @@ class Optimization:
                 # T[t+1]), so the re-solve is consistent with the trajectory the DP found.
                 end_temp = traj[1 : n + 1]
                 hp["cop_param"].value = utils.cop_from_tank_temperature(
-                    end_temp, hp["carnot"], outdoor_arr, approach=hp["approach"]
+                    end_temp, hp["carnot"], outdoor_arr, approach=hp["approach"], mode=sense
                 )
-                # Cap the re-solve at the DP's peak, but never below the temperature the
-                # static COP is valid for: if the DP under-scheduled (a thin demand
-                # estimate), the re-solve must still keep that curve-valid headroom to
-                # serve a demand spike, instead of going infeasible and reverting to the
-                # over-banked first solve. Super-heating above it (peak > valid) stays free.
-                src_cfg = self._get_load_source_config(hp["load_idx"])
-                curve = src_cfg.get("heating_curve") or {}
-                valid_temp = float(curve.get("max_supply", 70.0)) - float(hp["approach"])
-                peak = float(traj[:n].max())
-                extra_constraints.append(e["predicted_temp"] <= max(peak, valid_temp) + 1.0)
+                # Bound the re-solve to the DP's priced temperature range so it cannot
+                # exploit the un-priced region beyond it. Cool: floor the re-solve at the
+                # DP's TROUGH (the coldest it priced) - super-cooling below it would run on
+                # an un-refined, optimistic COP. Heat: cap the PEAK, but never below the
+                # curve-valid temperature, so a thin demand estimate still keeps headroom
+                # to serve a spike instead of reverting to the over-banked first solve.
+                if sense == "cool":
+                    dp_level = float(traj[:n].min())  # coldest temperature the DP priced
+                    extra_constraints.append(e["predicted_temp"] >= dp_level - 1.0)
+                else:
+                    src_cfg = self._get_load_source_config(hp["load_idx"])
+                    curve = src_cfg.get("heating_curve") or {}
+                    valid_temp = float(curve.get("max_supply", 70.0)) - float(hp["approach"])
+                    dp_level = float(traj[:n].max())  # hottest temperature the DP priced
+                    extra_constraints.append(e["predicted_temp"] <= max(dp_level, valid_temp) + 1.0)
                 refined = True
                 self.logger.info(
                     "DP COP refinement on tank '%s': COP inconsistency %.2f > %.2f - "
-                    "re-optimised to peak %.0f C, gas %.1f kWh",
+                    "re-optimised to %.0f C, gas %.1f kWh",
                     e["tank_id"],
                     max_err,
                     tol,
-                    peak,
+                    dp_level,
                     float(np.sum(res.backup_input_per_step) * dt),
                 )
             except Exception as exc:

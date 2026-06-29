@@ -403,20 +403,24 @@ def cop_from_tank_temperature(
     outdoor_temperature_forecast: Sequence[float] | np.ndarray | pd.Series,
     approach: float = 5.0,
     cop_bounds: tuple[float, float] = (1.0, 8.0),
+    mode: str = "heat",
 ) -> np.ndarray:
     """COP for a heat pump charging a tank to its *own* achieved temperature.
 
-    The condenser must run at the tank temperature plus a small heat-exchanger
-    approach, so the COP tracks the temperature the tank actually reaches rather
-    than a fixed weather curve. Used by the post-solve DP COP refinement to test
-    consistency and to set the COP at the globally-optimal temperature. Returns a
-    per-timestep COP array clipped to ``cop_bounds``.
+    The condenser (heat) runs at the tank temperature PLUS a small heat-exchanger
+    approach; the evaporator (cool) runs at the tank temperature MINUS the approach.
+    Either way the COP tracks the temperature the tank actually reaches rather than a
+    fixed weather curve. Used by the post-solve DP COP refinement to test consistency
+    and to set the COP at the globally-optimal temperature. Returns a per-timestep COP
+    array clipped to ``cop_bounds``.
     """
-    supply = np.asarray(tank_temperature, dtype=float) + float(approach)
+    tank = np.asarray(tank_temperature, dtype=float)
+    supply = tank - float(approach) if mode == "cool" else tank + float(approach)
     cops = calculate_cop_heatpump(
         supply_temperature=supply,
         carnot_efficiency=carnot_efficiency,
         outdoor_temperature_forecast=outdoor_temperature_forecast,
+        mode=mode,
     )
     return np.clip(np.asarray(cops, dtype=float), cop_bounds[0], cop_bounds[1])
 
@@ -470,28 +474,29 @@ def resolve_thermal_battery_cop(
         raise ValueError(
             "resolve_thermal_battery_cop in heat-pump mode requires outdoor_temperature_forecast"
         )
-    # Heating-curve mode: per-slot supply T from outdoor T. Falls back to constant
-    # `supply_temperature` when no curve is configured.
-    heating_curve = hc.get("heating_curve")
-    if heating_curve:
-        supply_temperature = apply_heating_curve(heating_curve, outdoor_temperature_forecast)
+    sense = normalize_heat_cool_mode(
+        hc.get("sense") or "heat", field_name="sense", context="thermal_battery"
+    )
+    # Curve mode: per-slot supply T from outdoor T (weather compensation). Heat sources
+    # read `heating_curve`, cool sources read `cooling_curve`; both fall back to a constant
+    # `supply_temperature` when no curve is configured. A curve makes the supply (and hence
+    # the COP) vary over the horizon, which is what makes the source DP-refinable.
+    curve = hc.get("cooling_curve") if sense == "cool" else hc.get("heating_curve")
+    if curve:
+        supply_temperature = apply_heating_curve(curve, outdoor_temperature_forecast)
     else:
         supply_temperature = hc.get("supply_temperature")
         if supply_temperature is None:
             raise ValueError(
                 "thermal_battery requires either 'efficiency' (constant-efficiency mode), "
-                "'supply_temperature' (constant heat-pump mode), or 'heating_curve' "
-                "(weather-compensated heat-pump mode)"
+                "'supply_temperature' (constant heat-pump mode), or a "
+                "'heating_curve'/'cooling_curve' (weather-compensated heat-pump mode)"
             )
     cops = calculate_cop_heatpump(
         supply_temperature=supply_temperature,
         carnot_efficiency=hc.get("carnot_efficiency", 0.4),
         outdoor_temperature_forecast=outdoor_temperature_forecast,
-        mode=normalize_heat_cool_mode(
-            hc.get("sense") or "heat",
-            field_name="sense",
-            context="thermal_battery",
-        ),
+        mode=sense,
     )
     return cops if length is None else cops[:length]
 

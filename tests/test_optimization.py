@@ -5302,6 +5302,81 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIn(opt.optim_status, ("Optimal", "Optimal (Relaxed)", "Optimal (Incumbent)"))
         self.assertGreater(res["P_deferrable0"].sum(), 0, "cooling source never ran")
 
+    def test_cool_sense_tank_with_cooling_curve_routes_through_dp(self):
+        """A cool tank whose source has a cooling_curve (a weather-compensated, variable
+        chilled supply) IS DP-refinable: its evaporator tracks the achieved tank
+        temperature, so it must be registered for the COOLING-mode DP refinement - unlike
+        a fixed-supply cool tank, which keeps its exact static COP. The cooling-mode DP
+        must run without erroring out to the static fallback, and still produce a valid
+        cooling plan."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [33.0] * 48
+        self.optim_conf["number_of_deferrable_loads"] = 1
+        self.optim_conf["nominal_power_of_deferrable_loads"] = [2100]
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [0]
+        self.optim_conf["operating_hours_of_each_deferrable_load"] = [0]
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False]
+        self.optim_conf["set_deferrable_load_single_constant"] = [False]
+        self.optim_conf["set_deferrable_startup_penalty"] = [0.0]
+        self.optim_conf["set_deferrable_max_startups"] = [0]
+        self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0]
+        self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0]
+        self.optim_conf["cop_solver"] = "auto"
+        self.optim_conf["def_load_config"] = [
+            {
+                "thermal_source": {
+                    "cooling_curve": {
+                        "slope": 0.3,
+                        "offset": 20,
+                        "min_supply": 8,
+                        "max_supply": 18,
+                    },
+                    "carnot_efficiency": 0.35,
+                    "sense": "cool",
+                }
+            },
+        ]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "zone",
+                "load_ids": [0],
+                "volume": 0.20,
+                "density": 1000,
+                "heat_capacity": 4.186,
+                "start_temperature": 24.0,
+                "thermal_loss": 0.30,
+                "sense": "cool",
+                "min_temperatures": [10.0] * 48,
+                "max_temperatures": [28.0] * 48,
+                "desired_temperatures": [22.0] * 48,
+                "penalty_factor": 10,
+            }
+        ]
+        opt = self.create_optimization()
+        ulc = self.df_input_data_dayahead[opt.var_load_cost].values
+        upp = self.df_input_data_dayahead[opt.var_prod_price].values
+        with self.assertLogs(opt.logger, level="INFO") as cm:
+            res = opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                ulc,
+                upp,
+            )
+        # The cool-curve tank IS registered for the cooling-mode DP refinement.
+        self.assertTrue(
+            getattr(opt, "_dp_tank_entries", []),
+            "a cool tank with a cooling_curve must be registered for DP refinement",
+        )
+        # The cooling-mode DP ran without crashing out to the per-tank static fallback.
+        self.assertFalse(
+            any("DP COP refinement failed" in m for m in cm.output),
+            f"cool-mode DP refinement errored: {[m for m in cm.output if 'failed' in m]}",
+        )
+        # And it still produces a valid cooling plan.
+        self.assertIn(opt.optim_status, ("Optimal", "Optimal (Relaxed)", "Optimal (Incumbent)"))
+        self.assertGreater(res["P_deferrable0"].sum(), 0, "cooling source never ran")
+
     def test_shared_thermal_tank_offset_load_ids(self):
         """A shared tank whose members are NOT loads 0..M-1 must work: this is
         exactly what heat_topology's extend_deferrable_loads produces (user
