@@ -3157,7 +3157,18 @@ class Optimization:
         # the handles needed to (a) test COP consistency after the solve and (b) run
         # the buffer DP on the tank's realised demand. Constant-efficiency-only tanks
         # (no heat pump) are never registered - the static COP is already exact there.
-        if dp_hp_info is not None and self.optim_conf.get("cop_solver", "auto") != "static":
+        # Cool-sense tanks are skipped too: thermal_dp.py models heating physics only
+        # (heating Carnot COP, tank-above-ambient standing loss), so refining a chilled
+        # store would invert its plan. They keep the static COP - the LP temperature
+        # dynamics already handle cooling correctly (sense_coeff flips the source term).
+        _dp_active = dp_hp_info is not None and self.optim_conf.get("cop_solver", "auto") != "static"
+        if _dp_active and sense_coeff < 0:
+            self.logger.info(
+                "Shared tank %s is cool-sense; skipping the heating-only DP COP "
+                "refinement and keeping the static COP.",
+                tank_id,
+            )
+        elif _dp_active:
             if not hasattr(self, "_dp_tank_entries"):
                 self._dp_tank_entries = []
             backup = None
