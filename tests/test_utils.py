@@ -3622,6 +3622,54 @@ class TestResolveThermalBatteryCopHeatingCurve(unittest.TestCase):
         self.assertIn("supply_temperature", msg)
         self.assertIn("heating_curve", msg)
 
+    def test_cooling_curve_gives_per_slot_cooling_cop(self):
+        """A cool source with a cooling_curve gets a weather-compensated chilled supply
+        and the cooling Carnot lift (T_outdoor - T_supply), so the COP varies per slot
+        and is higher when it is cooler outside."""
+        hc = {
+            "carnot_efficiency": 0.35,
+            "sense": "cool",
+            "cooling_curve": {"slope": 0.3, "offset": 20, "min_supply": 8, "max_supply": 18},
+        }
+        # outdoor 35 -> supply clip(20 - 0.3*35, 8, 18) = 9.5; outdoor 25 -> 12.5
+        cops = utils.resolve_thermal_battery_cop(hc, np.array([35.0, 25.0]))
+        # cooling COP = carnot * T_supply_K / (T_outdoor - T_supply); higher when cooler out
+        self.assertGreater(cops[1], cops[0])
+
+    def test_cooling_curve_compiles_through_topology(self):
+        """A heatpump source with a cooling_curve compiles into its thermal_source block
+        (mirroring heating_curve), so a chiller can be weather-compensated and DP-refined
+        via heat_topology - not only via def_load_config."""
+        topo = {
+            "sources": [
+                {
+                    "id": "chiller",
+                    "type": "heatpump",
+                    "carnot_efficiency": 0.35,
+                    "nominal_power": 2100,
+                    "cooling_curve": {"slope": 0.3, "offset": 20, "min_supply": 8, "max_supply": 18},
+                }
+            ],
+            "storage": [
+                {
+                    "id": "zone",
+                    "thermal_mass": 5.0,
+                    "loss_coefficient": 0.2,
+                    "comfort_sense": "cool",
+                    "start_temperature": 24,
+                    "min_temperature": [10] * 48,
+                    "max_temperature": [28] * 48,
+                }
+            ],
+            "flows": [{"from": "chiller", "to": "zone"}],
+        }
+        src = utils.compile_heat_topology(topo)["def_load_config"][0]["thermal_source"]
+        self.assertEqual(
+            src["cooling_curve"],
+            {"slope": 0.3, "offset": 20.0, "min_supply": 8.0, "max_supply": 18.0},
+        )
+        self.assertEqual(src["sense"], "cool")
+
 
 class TestCompileHeatTopology(unittest.TestCase):
     """Tests for the graph -> primitives compiler."""
