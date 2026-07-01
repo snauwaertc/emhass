@@ -5302,6 +5302,171 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIn(opt.optim_status, ("Optimal", "Optimal (Relaxed)", "Optimal (Incumbent)"))
         self.assertGreater(res["P_deferrable0"].sum(), 0, "cooling source never ran")
 
+    def test_dp_resolve_acceptance_matches_relaxed_retry_policy(self):
+        """The DP re-solve must accept/reject solver statuses with EXACTLY the same
+        policy as the main path (_needs_relaxed_retry) - in particular a user_limit
+        incumbent is a healthy accepted result there and must be here too. A single
+        shared predicate prevents the two lists drifting apart again."""
+        for status, value, accept in [
+            ("optimal", 1.0, True),
+            ("user_limit", 1.0, True),  # time-limited incumbent: accepted like the main path
+            ("user_limit", None, False),
+            ("infeasible", None, False),
+            ("infeasible", 1.0, False),
+            ("unbounded", 1.0, False),
+            (None, 1.0, False),
+        ]:
+            self.assertEqual(
+                Optimization._accept_dp_resolve(status, value),
+                accept,
+                f"status={status!r} value={value!r}",
+            )
+
+    def test_dp_resolve_opts_halve_time_budget(self):
+        """The DP re-solve runs AFTER the main solve may have spent its full time
+        budget; giving it the full budget again can nearly double a cycle's wall
+        clock. It gets half the budget (floor 10 s) - warm-started and only adding
+        bound constraints, it is expected to finish well within that."""
+        opts = {"time_limit": 120, "mip_rel_gap": 0.01}
+        out = Optimization._dp_resolve_opts(opts)
+        self.assertEqual(out["time_limit"], 60.0)
+        self.assertEqual(out["mip_rel_gap"], 0.01)
+        self.assertEqual(opts["time_limit"], 120, "original opts must not be mutated")
+        self.assertEqual(Optimization._dp_resolve_opts({"time_limit": 12})["time_limit"], 10.0)
+        self.assertNotIn("time_limit", Optimization._dp_resolve_opts({}))
+
+    def test_second_curve_heat_pump_on_tank_warns_not_silent(self):
+        """Only the FIRST curve-driven heat pump per shared tank is DP-refined (one
+        COP Parameter per tank); a second one keeps its static COP. That skip must
+        be logged - a silently mispriced source is invisible to the user."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
+        curve_src = {
+            "thermal_source": {
+                "heating_curve": {"slope": 0.7, "offset": 38, "min_supply": 28, "max_supply": 70},
+                "carnot_efficiency": 0.45,
+            }
+        }
+        self.optim_conf["number_of_deferrable_loads"] = 2
+        self.optim_conf["nominal_power_of_deferrable_loads"] = [3000, 3000]
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [0, 0]
+        self.optim_conf["operating_hours_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False, False]
+        self.optim_conf["set_deferrable_load_single_constant"] = [False, False]
+        self.optim_conf["set_deferrable_startup_penalty"] = [0.0, 0.0]
+        self.optim_conf["set_deferrable_max_startups"] = [0, 0]
+        self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["cop_solver"] = "auto"
+        self.optim_conf["def_load_config"] = [dict(curve_src), dict(curve_src)]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "buffer",
+                "load_ids": [0, 1],
+                "volume": 0.5,
+                "density": 1000,
+                "heat_capacity": 4.186,
+                "start_temperature": 40.0,
+                "thermal_loss": 0.0,
+                "min_temperatures": [35.0] * 48,
+                "max_temperatures": [65.0] * 48,
+            }
+        ]
+        opt = self.create_optimization()
+        ulc = self.df_input_data_dayahead[opt.var_load_cost].values
+        upp = self.df_input_data_dayahead[opt.var_prod_price].values
+        with self.assertLogs(opt.logger, level="WARNING") as cm:
+            opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                ulc,
+                upp,
+            )
+        joined = "\n".join(cm.output)
+        self.assertIn("static COP", joined)
+        self.assertIn("DP", joined)
+
+    def test_cool_tank_with_coupled_store_skips_dp_with_clear_log(self):
+        """thermal_dp does not support a coupled store in cooling mode yet: such a
+        tank must be skipped at DP registration with an explicit message (keeping
+        its static cooling COP), not fail deep inside the refinement where the
+        generic failure handler swallows the actual reason."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [33.0] * 48
+        self.optim_conf["number_of_deferrable_loads"] = 1
+        self.optim_conf["nominal_power_of_deferrable_loads"] = [2100]
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [0]
+        self.optim_conf["operating_hours_of_each_deferrable_load"] = [0]
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False]
+        self.optim_conf["set_deferrable_load_single_constant"] = [False]
+        self.optim_conf["set_deferrable_startup_penalty"] = [0.0]
+        self.optim_conf["set_deferrable_max_startups"] = [0]
+        self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0]
+        self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0]
+        self.optim_conf["cop_solver"] = "auto"
+        self.optim_conf["def_load_config"] = [
+            {
+                "thermal_source": {
+                    "cooling_curve": {
+                        "slope": 0.3,
+                        "offset": 20,
+                        "min_supply": 8,
+                        "max_supply": 18,
+                    },
+                    "carnot_efficiency": 0.35,
+                    "sense": "cool",
+                }
+            },
+        ]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "zone",
+                "load_ids": [0],
+                "volume": 0.20,
+                "density": 1000,
+                "heat_capacity": 4.186,
+                "start_temperature": 24.0,
+                "thermal_loss": 0.30,
+                "sense": "cool",
+                "min_temperatures": [10.0] * 48,
+                "max_temperatures": [28.0] * 48,
+                "desired_temperatures": [22.0] * 48,
+                "penalty_factor": 10,
+            },
+            {
+                # A substantial banking store (hc >= 20 kWh/K) so the coupled-store
+                # discovery actually couples it; zero loss + wide band keeps it
+                # trivially feasible (it just coasts).
+                "id": "sink",
+                "load_ids": [],
+                "thermal_mass": 100.0,
+                "loss_coefficient": 0.0,
+                "start_temperature": 20.0,
+                "sense": "cool",
+                "min_temperatures": [5.0] * 48,
+                "max_temperatures": [40.0] * 48,
+            },
+        ]
+        self.optim_conf["tank_transfers"] = [
+            {"from": "zone", "to": "sink", "transfer_coefficient": 1.0, "max_transfer_power": 5000}
+        ]
+        opt = self.create_optimization()
+        ulc = self.df_input_data_dayahead[opt.var_load_cost].values
+        upp = self.df_input_data_dayahead[opt.var_prod_price].values
+        with self.assertLogs(opt.logger, level="INFO") as cm:
+            res = opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                ulc,
+                upp,
+            )
+        self.assertIsNotNone(res)
+        joined = "\n".join(cm.output)
+        self.assertIn("not yet DP-refined", joined)
+        self.assertNotIn("DP COP refinement failed", joined)
+
     def test_cool_sense_tank_with_cooling_curve_routes_through_dp(self):
         """A cool tank whose source has a cooling_curve (a weather-compensated, variable
         chilled supply) IS DP-refinable: its evaporator tracks the achieved tank

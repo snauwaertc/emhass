@@ -2918,6 +2918,17 @@ class Optimization:
                     ),
                 }
             else:
+                if is_hp:
+                    # A second curve-driven heat pump on the same tank: only the
+                    # first is DP-refined (one COP Parameter per tank), so this one
+                    # keeps its pre-solve static COP. Say so - a silently mispriced
+                    # source is invisible to the user.
+                    self.logger.warning(
+                        "Shared tank '%s': load %s is a second curve-driven heat pump; "
+                        "only the first is DP-refined, this one keeps its static COP.",
+                        tank_id,
+                        k,
+                    )
                 cop_arrays.append(cops)
             # scalar, per-step list, or None (uncapped)
             source_caps.append(src_cfg.get("max_supply_temperature"))
@@ -3162,13 +3173,12 @@ class Optimization:
         # the handles needed to (a) test COP consistency after the solve and (b) run
         # the buffer DP on the tank's realised demand. Constant-efficiency-only tanks
         # (no heat pump) are never registered - the static COP is already exact there.
-        # Cool-sense tanks are skipped too: thermal_dp.py models heating physics only
-        # (heating Carnot COP, tank-above-ambient standing loss), so refining a chilled
-        # store would invert its plan. They keep the static COP - the LP temperature
-        # dynamics already handle cooling correctly (sense_coeff flips the source term).
-        # A tank is registered for DP refinement when it has a curve-driven (refinable)
-        # heat-pump source - heating OR cooling. A fixed-supply source has a constant COP
-        # (is_hp is False above, so dp_hp_info stays None) and keeps its exact static COP.
+        # A tank is registered when it has a curve-driven (refinable) heat-pump source,
+        # heating OR cooling (thermal_dp runs in the matching mode; sense is carried in
+        # dp_hp_info). A fixed-supply source has a constant COP (is_hp is False above,
+        # so dp_hp_info stays None) and keeps its exact static COP. The one cooling
+        # exception - a cool tank with a COUPLED store - is skipped at registration
+        # below (thermal_dp does not support that combination yet).
         _dp_active = dp_hp_info is not None and self.optim_conf.get("cop_solver", "auto") != "static"
         if _dp_active:
             if not hasattr(self, "_dp_tank_entries"):
@@ -3278,33 +3288,46 @@ class Optimization:
                         "desired": rdes_v,
                     }
                 )
-            self._dp_tank_entries.append(
-                {
-                    "coupled": coupled,
-                    "non_coupled_receivers": non_coupled_receivers,
-                    "tank_id": tank_id,
-                    "predicted_temp": predicted_temp,
-                    "conversion": float(conversion),
-                    "heating_demand": np.asarray(heating_demand, dtype=float),
-                    "xfer_net": xfer_net,  # cvxpy expr or zeros, length required_len-1
-                    "loss_coefficient": loss_coefficient,
-                    "thermal_losses": (
-                        None
-                        if loss_coefficient is not None
-                        else np.asarray(thermal_losses, dtype=float)
-                    ),
-                    "outdoor": np.asarray(outdoor_temp_arr, dtype=float),
-                    "start_temperature": float(start_temperature),
-                    "min_temp": min(
-                        (v for v in min_temperatures_list if v is not None), default=20.0
-                    ),
-                    "max_temp": max(
-                        (v for v in max_temperatures_list if v is not None), default=65.0
-                    ),
-                    "hp": dp_hp_info,
-                    "backup": backup,
-                }
-            )
+            if coupled is not None and dp_hp_info.get("sense") == "cool":
+                # thermal_dp does not support a coupled store in cooling mode yet -
+                # solving it would raise NotImplementedError deep inside the
+                # refinement, where the generic failure handler swallows the reason
+                # into an opaque warning. Skip registration with a clear message
+                # instead; the tank keeps its static cooling COP (docs promise this).
+                self.logger.info(
+                    "Shared tank '%s': cool-sense with a coupled store ('%s') is not "
+                    "yet DP-refined; keeping its static cooling COP.",
+                    tank_id,
+                    coupled["to"],
+                )
+            else:
+                self._dp_tank_entries.append(
+                    {
+                        "coupled": coupled,
+                        "non_coupled_receivers": non_coupled_receivers,
+                        "tank_id": tank_id,
+                        "predicted_temp": predicted_temp,
+                        "conversion": float(conversion),
+                        "heating_demand": np.asarray(heating_demand, dtype=float),
+                        "xfer_net": xfer_net,  # cvxpy expr or zeros, length required_len-1
+                        "loss_coefficient": loss_coefficient,
+                        "thermal_losses": (
+                            None
+                            if loss_coefficient is not None
+                            else np.asarray(thermal_losses, dtype=float)
+                        ),
+                        "outdoor": np.asarray(outdoor_temp_arr, dtype=float),
+                        "start_temperature": float(start_temperature),
+                        "min_temp": min(
+                            (v for v in min_temperatures_list if v is not None), default=20.0
+                        ),
+                        "max_temp": max(
+                            (v for v in max_temperatures_list if v is not None), default=65.0
+                        ),
+                        "hp": dp_hp_info,
+                        "backup": backup,
+                    }
+                )
 
         return predicted_temp, heating_demand, penalty_term
 
@@ -3563,18 +3586,14 @@ class Optimization:
         # values and restore them whenever the re-solve is rejected.
         saved_values = [(v, v.value) for v in self.prob.variables()]
         try:
-            prob2.solve(solver=selected_solver, warm_start=True, **solver_opts)
-            # Only accept the re-solve if it is genuinely good. A timed-out re-solve
-            # ("user_limit") can return a feasible-but-suboptimal value, but the main
-            # return path treats user_limit/None as failure - so accepting it here would
-            # replace the good static solve and then yield an empty plan. Reject the same
-            # statuses the main solver guard rejects.
-            bad_status = prob2.status is None or str(prob2.status).lower() in (
-                "infeasible",
-                "unbounded",
-                "user_limit",
-            )
-            if prob2.value is not None and not bad_status:
+            # Half the time budget: the main solve may already have spent the full
+            # limit, and the warm-started re-solve only adds bound constraints.
+            prob2.solve(solver=selected_solver, warm_start=True, **self._dp_resolve_opts(solver_opts))
+            # Accept with EXACTLY the main path's policy (shared predicate): a
+            # user_limit incumbent is healthy - the main return path publishes it
+            # as "Optimal (Incumbent)" - while infeasible/unbounded/None-value
+            # results restore the static solve.
+            if self._accept_dp_resolve(prob2.status, prob2.value):
                 self.prob = prob2
             else:
                 for v, val in saved_values:
@@ -4453,6 +4472,36 @@ class Optimization:
         """
         return status in ("infeasible", "unbounded", None) or value is None
 
+    @staticmethod
+    def _accept_dp_resolve(status, value) -> bool:
+        """Whether the DP refinement's re-solve result is usable.
+
+        Defined as the exact complement of ``_needs_relaxed_retry`` so the DP
+        re-solve accepts/rejects statuses with the SAME policy as the main solve
+        path - in particular a ``user_limit`` (time-limited) result with a feasible
+        incumbent is healthy there (published as "Optimal (Incumbent)") and is
+        accepted here too. A single shared predicate prevents the two acceptance
+        lists drifting apart again.
+        """
+        status_norm = str(status).lower() if status is not None else None
+        return not Optimization._needs_relaxed_retry(status_norm, value)
+
+    @staticmethod
+    def _dp_resolve_opts(solver_opts: dict) -> dict:
+        """Solver options for the DP refinement's re-solve: half the time budget.
+
+        The re-solve runs AFTER the main solve may already have spent its full
+        ``time_limit``; handing it the full budget again can nearly double a
+        cycle's wall clock on exactly the hard problems that hit the limit. It
+        warm-starts from the static solution and only adds bound constraints, so
+        half the budget (floor 10 s) is ample; a timeout still degrades safely
+        (the static solve is restored). Returns a copy - never mutates the input.
+        """
+        opts = dict(solver_opts)
+        if "time_limit" in opts:
+            opts["time_limit"] = max(10.0, float(opts["time_limit"]) / 2.0)
+        return opts
+
     def perform_optimization(
         self,
         data_opt: pd.DataFrame,
@@ -4837,10 +4886,6 @@ class Optimization:
         # operating timesteps so the per-load loop below can decrement required_timesteps
         # and target_energy accordingly.
         self._update_def_current_operating_timesteps_params(num_deferrable_loads)
-
-        # Shared-tank members are temperature-driven; used below to exempt them
-        # from the operating-timestep deactivation in the param_load_active loop.
-        shared_tank_membership = self._load_shared_tank_membership()
 
         # Loads whose must-run requirement is fully satisfied by the COTS decrement
         # (issue #983): elapsed completed timesteps >= required, so remaining clamps
