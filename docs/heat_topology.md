@@ -62,6 +62,7 @@ Each source is one heat producer. Common fields:
 | `electric` | bool | by type | Overrides bus membership. Defaults: heat pump / electric / constant_efficiency -> `true`; gas / oil / district -> `false`. |
 | `cost_track` | string | none | Key into `cost_tracks`. Sets this load's per-timestep cost (gas tariff vs electricity tariff). |
 | `max_supply_temperature` | number or list | none | Hard ceiling (degC) on the storage temperature this source can heat into. Scalar, or a per-step list for weather-dependent condenser limits (a short list is forward-filled with its last value). Omit to leave the source uncapped. |
+| `max_thermal_power` | number | none | Hard ceiling (W) on delivered heat: `cop * electrical power` is capped so a high COP (a small mild-weather Carnot lift) cannot make the model deliver more heat than the unit's rated thermal output. Scalar only. Omit to leave the source uncapped. |
 | `overshoot_temperature` | number | storage value | Soft threshold (degC): with the storage's `desired_temperatures` set, this source stops while the storage sits above it. Overrides the storage-level `overshoot_temperature`; omit to inherit it. |
 
 **Heat-pump sources** (`heatpump` / `heat_pump`) additionally need a supply temperature,
@@ -129,6 +130,30 @@ This is a physical limit, not a preference: it stays enforced even in the relaxe
 fallback. For a *soft* preference (run the booster only above some comfort threshold,
 at a penalty), use the storage-level `desired_temperatures` / `overshoot_temperature`
 fields instead - the two mechanisms compose.
+
+**Per-source thermal-output ceiling** (`max_thermal_power`). A heat pump's delivered
+heat is `cop * electrical power`, and a weather-compensated `heating_curve` COP climbs
+steeply as the outdoor/supply temperature lift shrinks. On a mild day a small unit can
+therefore *model* far more heat than it can physically produce - e.g. a 5.7 kW-electrical
+pump at COP 8 would "deliver" ~46 kW, well above its ~15 kW rated output. Setting
+`max_thermal_power` to the unit's rated thermal output caps `cop * electrical` directly,
+so the optimizer also draws less electrical power when it is thermally limited (the
+right physical behaviour), not just less heat. Unlike `nominal_power` (an *electrical*
+input bound) this bounds the *thermal output*, which is what the compressor actually
+limits.
+
+```json
+"sources": [
+  { "id": "hp", "type": "heatpump", "nominal_power": 5700,
+    "heating_curve": { "slope": 0.7, "offset": 38 },
+    "carnot_efficiency": 0.46, "max_thermal_power": 15000 }
+]
+```
+
+> **Caveat:** combining a nonzero `min_power` with a tight `max_thermal_power` on a
+> variable-COP source can be infeasible on a mild day - if `cop * min_power` exceeds
+> `max_thermal_power` at some step, the source cannot run at all there. This surfaces as
+> an infeasible solver status, not a silent wrong answer.
 
 ### `storage`
 
@@ -434,6 +459,7 @@ The compiler fails fast with a `ValueError` naming the offending field when:
 - a `comfort_sense` is not `heat` or `cool`;
 - an `actuator_groups[..].flows` entry references a flow that does not exist;
 - a `max_supply_temperature` is non-positive or an empty list;
+- a `max_thermal_power` is non-positive;
 - a storage's static `min_temperatures[t]` exceeds the highest
   `max_supply_temperature` of every source feeding it (the band would be
   physically unreachable - raise a ceiling, lower the minimum, or add an

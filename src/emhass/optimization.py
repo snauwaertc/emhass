@@ -2871,6 +2871,10 @@ class Optimization:
         # Optional per-source temperature ceiling (e.g. a heat pump capped at its
         # supply temperature). None = no cap (e.g. an electric booster).
         source_caps: list[float | None] = []
+        # Optional per-source thermal-output ceiling (W): caps cop * p_deferrable
+        # so a high COP cannot deliver more heat than the unit's rated output.
+        # None = uncapped.
+        source_thermal_caps: list[float | None] = []
         # Optional per-source soft threshold: the source is switched off while
         # the tank sits beyond it (used with the tank's desired_temperatures).
         # A source without its own value inherits the tank-level
@@ -2932,6 +2936,8 @@ class Optimization:
                 cop_arrays.append(cops)
             # scalar, per-step list, or None (uncapped)
             source_caps.append(src_cfg.get("max_supply_temperature"))
+            # scalar W, or None (uncapped thermal output)
+            source_thermal_caps.append(src_cfg.get("max_thermal_power"))
             source_overshoots.append(src_cfg.get("overshoot_temperature", tank_overshoot))
 
         # Comfort sense (heat vs cool). The compiler propagates the destination
@@ -3102,6 +3108,21 @@ class Optimization:
             constraints.append(predicted_temp - cap_arr <= big_m_temp * (1 - allow_k))
             constraints.append(predicted_temp[1:] - cap_arr[1:] <= big_m_temp * (1 - allow_k[:-1]))
             constraints.append(p_k <= nominal_k * allow_k)
+
+        # Per-source thermal-output ceiling. A source with `max_thermal_power`
+        # caps its delivered heat (cop * electrical power) so a high COP - e.g. a
+        # small mild-weather Carnot lift - cannot make the model deliver more heat
+        # than the physical unit's rated thermal output. Unlike the temperature
+        # ceiling above this is a straight linear power bound (no big-M gate) and
+        # is DPP-safe: `cops` is either a cp.Parameter (a DP-refinable heat pump,
+        # re-valued by _refine_cop_with_dp) or a constant array, and
+        # parameter/const * variable <= const is affine - so the cap re-applies
+        # with the refined COP on any DP re-solve.
+        for k, thermal_cap, cops in zip(load_ids, source_thermal_caps, cop_arrays):
+            if thermal_cap is None:
+                continue
+            p_k = self.vars["p_deferrable"][k]
+            constraints.append(cp.multiply(cops, p_k) <= float(thermal_cap))
 
         # Soft comfort constraints (issue #539): the tank's desired_temperatures
         # set a comfort target whose shortfall is penalized in the objective

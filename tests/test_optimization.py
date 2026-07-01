@@ -4445,6 +4445,93 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             msg="A never-binding cap must not change dispatch",
         )
 
+    def _run_hp_thermal_cap(self, max_thermal_power, nominal=5000):
+        """One shared tank fed by a single heat pump running at a HIGH COP (warm
+        20 C outdoor + low 30 C supply -> small Carnot lift). A single strictly
+        cheapest price slot makes the uncapped HP concentrate all its banking
+        there, delivering far more heat (cop * electrical) than a real unit
+        could. A mid-horizon min_temperature of 50 C creates the demand.
+        `max_thermal_power` (W thermal, or None) caps cop * electrical."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [20.0] * 48
+        hp_source = {"supply_temperature": 30.0, "carnot_efficiency": 0.5}
+        if max_thermal_power is not None:
+            hp_source["max_thermal_power"] = max_thermal_power
+        min_t = [30.0] * 48
+        for i in range(30, 36):
+            min_t[i] = 50.0  # demand: tank must reach 50 C mid-horizon
+        self.optim_conf["number_of_deferrable_loads"] = 1
+        self.optim_conf["nominal_power_of_deferrable_loads"] = [nominal]
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [0]
+        self.optim_conf["operating_hours_of_each_deferrable_load"] = [0]
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False]
+        self.optim_conf["set_deferrable_load_single_constant"] = [False]
+        self.optim_conf["set_deferrable_startup_penalty"] = [0.0]
+        self.optim_conf["set_deferrable_max_startups"] = [0]
+        self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0]
+        self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0]
+        self.optim_conf["def_load_config"] = [{"thermal_source": hp_source}]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "tank",
+                "load_ids": [0],
+                "volume": 1.0,
+                "density": 1000,
+                "heat_capacity": 4.186,
+                "start_temperature": 40.0,
+                "thermal_loss": 0.0,
+                "min_temperatures": min_t,
+                "max_temperatures": [65.0] * 48,
+            }
+        ]
+        opt = self.create_optimization()
+        # One strictly-cheapest slot (10) forces the uncapped HP to concentrate
+        # its banking there rather than spreading it thin.
+        ulc = np.full(48, 0.30)
+        ulc[8:12] = 0.05
+        ulc[10] = 0.01
+        upp = self.df_input_data_dayahead[opt.var_prod_price].values
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            ulc,
+            upp,
+        )
+        return opt, res
+
+    def test_max_thermal_power_caps_heat_pump_under_high_cop(self):
+        """A per-source max_thermal_power bounds delivered heat (cop * electrical)
+        so a high summer COP cannot make the model deliver more than the unit's
+        rated thermal output - and it stays feasible by spreading the load."""
+        cap = 10000.0  # W thermal
+        cop = np.asarray(
+            utils.resolve_thermal_battery_cop(
+                {"supply_temperature": 30.0, "carnot_efficiency": 0.5},
+                [20.0] * 48,
+                length=48,
+            )
+        )
+        # Load-bearing: without the cap the HP concentrates its heat and delivers
+        # well above the cap at the cheapest slot (else the test proves nothing).
+        opt0, res0 = self._run_hp_thermal_cap(max_thermal_power=None)
+        self.assertEqual(opt0.optim_status, "Optimal")
+        thermal0 = cop * res0["P_deferrable0"].reset_index(drop=True).to_numpy()
+        self.assertGreater(
+            thermal0.max(),
+            cap,
+            "Uncapped scenario must exceed the cap somewhere, else the test is vacuous",
+        )
+        # With the cap, delivered heat stays at or below it at every step.
+        opt1, res1 = self._run_hp_thermal_cap(max_thermal_power=cap)
+        self.assertEqual(opt1.optim_status, "Optimal")
+        thermal1 = cop * res1["P_deferrable0"].reset_index(drop=True).to_numpy()
+        self.assertLessEqual(
+            thermal1.max(),
+            cap + 1e-3,
+            "max_thermal_power must cap delivered heat (cop * electrical) at every step",
+        )
+
     def test_per_step_list_cap_pads_to_horizon(self):
         """A per-step cap list shorter than the horizon is forward-filled with its
         last value: the 53 C ceiling keeps applying after the list ends, so the
