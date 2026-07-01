@@ -71,13 +71,15 @@ def record(
     a lock. File write failure is logged-and-swallowed so a disk error never
     breaks the caller's return path.
 
-    Status mapping: optim_status "Optimal" -> "ok", "Infeasible" (or
+    Status mapping: any "Optimal..." optim_status -> "ok" (the optimizer
+    publishes accepted plans as "Optimal", "Optimal (Relaxed)",
+    "Optimal (Incumbent)" or "Optimal_Inaccurate"), "Infeasible" (or
     infeasible=True) -> "infeasible", anything else -> "error". This errs
     on the side of caution: an unrecognised solver status is surfaced as
     "error" rather than silently classified as healthy.
     """
     global _cache
-    if optim_status == "Optimal":
+    if optim_status and optim_status.startswith("Optimal"):
         status = "ok"
     elif optim_status == "Infeasible" or infeasible:
         status = "infeasible"
