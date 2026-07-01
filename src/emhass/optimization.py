@@ -3427,11 +3427,14 @@ class Optimization:
                     mn = min(len(ext), len(need))
                     ext[:mn] += need[:mn]  # add the receiver's true comfort demand
                 # ext is the LP heating_demand (signed): a positive heat draw for a heat
-                # tank, a negative signed gain for a cool tank. sense_sign maps either to a
-                # positive load magnitude the DP must serve (remove, in cool mode).
-                demand_kw = np.maximum(sense_sign * ext, 0.0) / dt
+                # tank, a negative signed gain for a cool tank. sense_sign maps either to
+                # the DP's load convention; negative values (net solar/window gain beyond
+                # losses) pass through as free heat - the LP's own dynamics credit them,
+                # so clamping them to zero would make the DP over-provision exactly the
+                # sunny steps. The DP sheds any surplus its grid cannot absorb at zero
+                # cost, so gains never force a purchase or an infeasibility.
+                demand_kw = sense_sign * ext / dt
                 outdoor_arr = np.asarray(e["outdoor"], dtype=float)[:n]
-                outdoor_ref = float(np.mean(outdoor_arr))
                 backup = e["backup"]
                 backup_price = 1e6
                 if backup is not None and getattr(self, "param_cost_per_load", None):
@@ -3464,7 +3467,9 @@ class Optimization:
                     backup_price=backup_price,
                     demand_kw=demand_kw,
                     mode=sense,
-                    ambient_temperature=outdoor_ref,  # EMHASS tanks lose to outdoor
+                    # Per-step: EMHASS tanks lose to outdoor, and the LP prices that
+                    # loss per step - a horizon mean would misprice diurnal swings.
+                    ambient_temperature=outdoor_arr,
                     **coupled_kwargs,
                 )
                 res = solve_thermal_dp(
