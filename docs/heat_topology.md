@@ -87,7 +87,8 @@ A heat-pump source must provide one of `heating_curve`, `cooling_curve`, or
 > globally-optimal trajectory. A constant `supply_temperature` source has a fixed COP and
 > keeps its exact static value. For cooling the DP runs in cooling mode (the chiller
 > removes heat, charging the store *colder*); a cool storage with a coupled store is not
-> yet DP-refined and keeps its static COP.
+> yet DP-refined and keeps its static COP. A source's `max_thermal_power` is honored by
+> the DP too: its trajectories never assume more deliverable heat than the rated output.
 
 > **`supply_temperature` drives the COP only - it is not a physical ceiling.**
 > A constant-supply heat pump cannot heat water above its supply temperature, but

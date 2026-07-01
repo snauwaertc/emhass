@@ -2920,6 +2920,10 @@ class Optimization:
                     or float(
                         max(np.atleast_1d(self.optim_conf["nominal_power_of_deferrable_loads"][k]))
                     ),
+                    # Rated thermal ceiling (W, None = uncapped): forwarded to the DP so
+                    # its trajectories respect the same physical limit the LP's
+                    # max_thermal_power constraint enforces on cop * p_deferrable.
+                    "max_thermal_power": src_cfg.get("max_thermal_power"),
                 }
             else:
                 if is_hp:
@@ -3508,6 +3512,11 @@ class Optimization:
                     carnot_efficiency=hp["carnot"],
                     hx_approach=hp["approach"],
                     hp_max_power=hp["nominal_power"] / 1000.0,
+                    max_thermal_power=(
+                        float(hp["max_thermal_power"]) / 1000.0
+                        if hp.get("max_thermal_power")
+                        else None
+                    ),
                     backup_efficiency=(backup["efficiency"] if backup else 0.95),
                     backup_max_power=(backup["nominal_power"] / 1000.0 if backup else 0.0),
                     backup_price=backup_price,
