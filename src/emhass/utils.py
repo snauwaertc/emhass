@@ -791,6 +791,23 @@ def compile_heat_topology(topology: dict) -> dict:
                     src["id"],
                     float(source_block["supply_temperature"]),
                 )
+        # Optional per-source thermal-output ceiling (W): caps cop * p_deferrable
+        # so a high COP (e.g. a small mild-weather Carnot lift) cannot make the
+        # model deliver more heat than the physical unit's rated thermal output.
+        # Unlike max_supply_temperature this is a straight power bound, not a
+        # temperature-gated switch, and is scalar-only: a unit's rated thermal
+        # output is a fixed hardware spec, not weather-dependent like condenser
+        # temperature.
+        _thermal_cap = src.get("max_thermal_power")
+        if _thermal_cap is not None:
+            thermal_cap_value = float(_thermal_cap)
+            if thermal_cap_value <= 0:
+                raise ValueError(
+                    f"heat_topology.sources[{src['id']}].max_thermal_power "
+                    "must be > 0 W; a non-positive ceiling permanently disables "
+                    "the source. Omit the key to leave it uncapped."
+                )
+            source_block["max_thermal_power"] = thermal_cap_value
         # Optional per-source soft threshold: with the storage's
         # desired_temperatures set, this source is switched off while the tank
         # sits above this temperature (a preference, unlike the hard
