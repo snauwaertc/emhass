@@ -222,71 +222,91 @@ def solve_thermal_dp(
 
     INF = 1e15
 
-    def cheapest(Qin: np.ndarray, t: int, j: int) -> np.ndarray:
-        """Cost over each current state i to deliver Qin (kWh thermal) at step t while
-        charging to target j (the HP runs at grid[j]'s supply temperature, so the COP is
-        the scalar cop2d[t, j])."""
-        Qpos = np.maximum(Qin, 0.0)
-        cop_t = cop2d[t, j]
-        qhp = np.where(
-            price[t] / cop_t <= cp_backup,
-            np.minimum(Qpos, hp_cap_th[t, j]),
-            np.maximum(Qpos - p.backup_max_power * p.backup_efficiency * dt, 0.0),
-        )
-        qbk = Qpos - qhp
-        return (qhp / cop_t) * price[t] + (qbk / p.backup_efficiency) * p.backup_price
+    # Backward induction, vectorized over (current state i, target j) with a short
+    # Python loop over the transfer levels qi only: N * nq iterations instead of
+    # N * nt * nq (measured ~36x wall-clock on a coupled buffer+pool day-ahead
+    # horizon, where the per-(t, j, qi) Python/numpy call overhead dominated).
+    #
+    # Precomputed invariants:
+    # - delta_e[i, j]: energy to move the store from state i to target j.
+    # - xf_bound[i, c]: conductance transfer bound. Clamped at 0: when the feeder is
+    #   COLDER than the receiver heat cannot flow uphill, yet transferring NOTHING
+    #   (qxf=0) must always stay legal - without the clamp the bound goes negative
+    #   and every state with a warmer coupled store turns spuriously infeasible.
+    #
+    # Tie-breaking: ties are resolved lexicographically by (qi, j) - the previous
+    # per-(j, qi) loop resolved by (j, qi). Both pick an exactly-optimal policy;
+    # only the choice AMONG equal-cost optima can differ.
+    delta_e = sc * (grid[None, :] - grid[:, None]) * p.heat_capacity  # (i, j)
+    bk_cap = p.backup_max_power * p.backup_efficiency * dt
+    if use_coupled:
+        xf_bound = np.maximum(0.0, p.coupling_coeff * (grid[:, None] - cgrid[None, :])) * dt
 
-    # Backward induction.
     V = np.zeros((nt, ncl))
     POL = np.zeros((N, nt, ncl, 2), dtype=np.int16)
     for t in range(N - 1, -1, -1):
         Vn = np.full((nt, ncl), INF)
         best_j = np.zeros((nt, ncl), np.int16)
         best_q = np.zeros((nt, ncl), np.int16)
+        # Net external term per current state i. Heat (sc=+1): Qin to ADD =
+        # delta_e + demand + loss. Cool (sc=-1): Qin to REMOVE = -delta + demand
+        # - loss, i.e. sc flips the temperature delta and the passive-loss term
+        # while the demand stays a positive load.
+        ext = demand[t] * dt + sc * loss[t]  # (i,)
         # Surplus free inflow per current state (nt,): when the net external term is
         # negative (solar/window gain beyond losses, or a store colder than ambient),
         # the discretized state may be unable to absorb it - e.g. a sub-grid-cell
         # gain makes even coasting need Qin < 0. Allow shedding EXACTLY that surplus
-        # at zero cost (cheapest() already prices max(Qin, 0)): the physical store
-        # just warms within its cell / saturates at its ceiling. Bounding the slack
-        # by the actual free inflow is what keeps energy conserved - a universal
-        # slack would let coupled-store transfers be fed with phantom heat.
-        surplus = np.maximum(0.0, -(demand[t] * dt + sc * loss[t]))
-        for j in range(nt):
-            # Energy the unit must move to reach target j from each current state. Heat
-            # (sc=+1): Qin to ADD = (grid[j]-grid)*hc + demand + loss. Cool (sc=-1): Qin to
-            # REMOVE = (grid-grid[j])*hc + demand - loss, i.e. sc flips the temperature
-            # delta and the passive-loss term while the demand stays a positive load.
-            base = sc * (grid[j] - grid) * p.heat_capacity + demand[t] * dt + sc * loss[t]
-            for qi, qxf in enumerate(qxf_levels):
-                Qin = base + qxf
-                cost = cheapest(Qin, t, j)
-                feas_t = (Qin >= -surplus - 1e-9) & (Qin <= qin_max[t, j] + 1e-9)
-                if use_coupled:
-                    Tc2 = cgrid + (qxf - closs[t]) / p.coupled_heat_capacity
-                    feas_c = (Tc2 >= cgrid[0] - 1e-9) & (Tc2 <= cgrid[-1] + 1e-9)
-                    Vnext = np.interp(Tc2, cgrid, V[j, :])
-                    # Conductance limits the transfer to coupling_coeff*(T_from-T_to), but
-                    # clamp at 0: when the feeder is COLDER than the receiver heat cannot
-                    # flow uphill, yet transferring NOTHING (qxf=0) must always stay legal.
-                    # Without the clamp the bound goes negative and even qxf=0 is rejected,
-                    # making every state with a warmer coupled store spuriously infeasible.
-                    xf_ok = (
-                        qxf
-                        <= np.maximum(0.0, p.coupling_coeff * (grid[:, None] - cgrid[None, :])) * dt
-                        + 1e-9
-                    )
-                    val = np.where(
-                        feas_t[:, None] & feas_c[None, :] & xf_ok,
-                        cost[:, None] + Vnext[None, :],
-                        INF,
-                    )
-                else:
-                    val = np.where(feas_t, cost + V[j, 0], INF)[:, None]
-                upd = val < Vn
-                Vn = np.where(upd, val, Vn)
-                best_j = np.where(upd, j, best_j)
-                best_q = np.where(upd, qi, best_q)
+        # at zero cost (the cost below prices max(Qin, 0)): the physical store just
+        # warms within its cell / saturates at its ceiling. Bounding the slack by
+        # the actual free inflow is what keeps energy conserved - a universal slack
+        # would let coupled-store transfers be fed with phantom heat.
+        surplus = np.maximum(0.0, -ext)
+        hp_cheaper = (price[t] / cop2d[t]) <= cp_backup  # (j,)
+        for qi, qxf in enumerate(qxf_levels):
+            Qin = delta_e + ext[:, None] + qxf  # (i, j)
+            Qpos = np.maximum(Qin, 0.0)
+            # Cheapest split between the HP (at target j's COP) and the backup.
+            qhp = np.where(
+                hp_cheaper[None, :],
+                np.minimum(Qpos, hp_cap_th[t][None, :]),
+                np.maximum(Qpos - bk_cap, 0.0),
+            )
+            qbk = Qpos - qhp
+            cost = (qhp / cop2d[t][None, :]) * price[t] + qbk * cp_backup  # (i, j)
+            feas_t = (Qin >= -surplus[:, None] - 1e-9) & (Qin <= qin_max[t][None, :] + 1e-9)
+            if use_coupled and ncl > 1:
+                Tc2 = cgrid + (qxf - closs[t]) / p.coupled_heat_capacity  # (c,)
+                feas_c = (Tc2 >= cgrid[0] - 1e-9) & (Tc2 <= cgrid[-1] + 1e-9)
+                # Linear interpolation of V[j, :] at Tc2 for every j at once
+                # (replaces one np.interp call per (j, qi)): index/weight form.
+                xc = np.clip(Tc2, cgrid[0], cgrid[-1])
+                hi = np.clip(np.searchsorted(cgrid, xc, side="left"), 1, ncl - 1)
+                lo = hi - 1
+                w = (xc - cgrid[lo]) / (cgrid[hi] - cgrid[lo])
+                Vnext = V[:, lo] * (1.0 - w)[None, :] + V[:, hi] * w[None, :]  # (j, c)
+                mask = (
+                    feas_t[:, :, None]
+                    & feas_c[None, None, :]
+                    & (qxf <= xf_bound + 1e-9)[:, None, :]
+                )
+                val = np.where(mask, cost[:, :, None] + Vnext[None, :, :], INF)  # (i, j, c)
+            elif use_coupled:
+                # Degenerate single-state coupled store (min == max): the transfer
+                # must exactly offset its standing loss to stay on the only state.
+                Tc2 = cgrid[0] + (qxf - closs[t, 0]) / p.coupled_heat_capacity
+                feas_c = bool(cgrid[0] - 1e-9 <= Tc2 <= cgrid[-1] + 1e-9)
+                mask = feas_t & feas_c & (qxf <= xf_bound[:, 0] + 1e-9)[:, None]
+                val = np.where(mask, cost + V[:, 0][None, :], INF)[:, :, None]  # (i, j, 1)
+            else:
+                val = np.where(feas_t, cost + V[:, 0][None, :], INF)[:, :, None]  # (i, j, 1)
+            # Best target j for this transfer level, then fold into the running best.
+            idx_j = np.argmin(val, axis=1)  # (i, c)
+            vmin = np.take_along_axis(val, idx_j[:, None, :], axis=1)[:, 0, :]  # (i, c)
+            upd = vmin < Vn
+            Vn = np.where(upd, vmin, Vn)
+            best_j = np.where(upd, idx_j.astype(np.int16), best_j)
+            best_q = np.where(upd, np.int16(qi), best_q)
         V = Vn
         POL[t, :, :, 0] = best_j
         POL[t, :, :, 1] = best_q
