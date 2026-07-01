@@ -170,6 +170,33 @@ class TestWebServer(unittest.IsolatedAsyncioTestCase):
     @patch("os.path.exists")
     @patch("emhass.web_server.build_params")
     @patch("emhass.web_server.param_to_config")
+    async def test_parameter_set_rejects_heat_topology_missing_id(
+        self, mock_p2c, mock_build_params, mock_exists, mock_file
+    ):
+        """A source entry without an `id` must return the clean 400 validation
+        message like any other invalid topology - not an unhandled 500 from an
+        internal KeyError."""
+        mock_exists.return_value = True
+        f_defaults = AsyncMock()
+        f_defaults.read.return_value = orjson.dumps({"default": 1})
+        mock_file.return_value.__aenter__.return_value = f_defaults
+        bad_topology = {
+            "sources": [{"type": "gas", "efficiency": 0.9, "nominal_power": 1000}],
+            "storage": [{"id": "dhw", "volume": 0.2}],
+            "flows": [],
+        }
+        response = await self.client.post("/set-config", json={"heat_topology": bad_topology})
+        self.assertEqual(response.status_code, 400)
+        body = await response.get_json()
+        self.assertIn("heat_topology is invalid", body[0])
+        self.assertIn("id", body[0])
+        mock_build_params.assert_not_called()
+        mock_p2c.assert_not_called()
+
+    @patch("emhass.web_server.aiofiles.open")
+    @patch("os.path.exists")
+    @patch("emhass.web_server.build_params")
+    @patch("emhass.web_server.param_to_config")
     async def test_parameter_set_accepts_valid_heat_topology(
         self, mock_p2c, mock_build_params, mock_exists, mock_file
     ):

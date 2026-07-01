@@ -3974,6 +3974,31 @@ class TestCompileHeatTopology(unittest.TestCase):
         # Booster (load 1) has no cap -> key absent
         self.assertNotIn("max_supply_temperature", out["def_load_config"][1]["thermal_source"])
 
+    def test_missing_id_raises_value_error_with_field_path(self):
+        """A source/storage entry without an `id` must raise the documented
+        ValueError naming the offending field, not an internal KeyError - the
+        web UI's save-time validation (and any other caller) only catches
+        ValueError, so a KeyError surfaces as an unhandled 500."""
+        no_source_id = {
+            "sources": [{"type": "gas", "efficiency": 0.9, "nominal_power": 1000}],
+            "storage": [{"id": "dhw", "volume": 0.2}],
+            "flows": [],
+        }
+        with self.assertRaises(ValueError) as ctx:
+            utils.compile_heat_topology(no_source_id)
+        self.assertIn("sources[0]", str(ctx.exception))
+        self.assertIn("id", str(ctx.exception))
+
+        no_storage_id = {
+            "sources": [{"id": "boiler", "type": "gas", "efficiency": 0.9, "nominal_power": 1000}],
+            "storage": [{"volume": 0.2}],
+            "flows": [],
+        }
+        with self.assertRaises(ValueError) as ctx:
+            utils.compile_heat_topology(no_storage_id)
+        self.assertIn("storage[0]", str(ctx.exception))
+        self.assertIn("id", str(ctx.exception))
+
     def test_source_overshoot_temperature_passed_through(self):
         """A source's overshoot_temperature (soft per-source threshold) is
         compiled into its thermal_source block; sources without it omit the
