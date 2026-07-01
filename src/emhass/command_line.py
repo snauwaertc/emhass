@@ -273,7 +273,12 @@ class OptimizationCache:
             "desired_temperatures",
             "indoor_target_temperature",  # thermal_battery runtime param
             "q_input_initial",  # thermal inertia warm-start override
-            "draw_off_demand",  # hot water tank daily profile (updates heating_demand param)
+            # Hot water daily profile - THERMAL_BATTERY loads only: their
+            # heating_demand is a cp.Parameter refreshed by update_thermal_params.
+            # Shared-tank draw_off_demand is deliberately NOT excluded from the
+            # shared_thermal_tanks hash below: it is baked into the tank dynamics
+            # as a raw array at build time, so changing it must force a rebuild.
+            "draw_off_demand",
         }
         # Plant parameters that are updated dynamically (no rebuild needed)
         plant_runtime_keys = {
@@ -387,12 +392,11 @@ class OptimizationCache:
                 (
                     t.get("id", ""),
                     tuple(int(k) for k in t.get("load_ids", [])),
+                    # start_temperature is runtime-updatable (update_thermal_start_temps);
+                    # everything else - INCLUDING draw_off_demand, which is baked into
+                    # the tank dynamics as a raw array at build time - is structural.
                     config_hash(
-                        {
-                            k: v
-                            for k, v in t.items()
-                            if k not in {"start_temperature", "draw_off_demand"}
-                        },
+                        {k: v for k, v in t.items() if k != "start_temperature"},
                     ),
                 )
                 for t in optim_conf.get("shared_thermal_tanks", []) or []

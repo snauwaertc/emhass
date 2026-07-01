@@ -2807,6 +2807,38 @@ class TestOptimizationCache(unittest.TestCase):
 
         self.assertNotEqual(key1, key2)
 
+    def test_cache_key_rebuilds_on_shared_tank_draw_off_change(self):
+        """A shared tank's draw_off_demand is baked into the LP as a raw numpy
+        array at build time (unlike thermal_battery's, which is parameterized), so
+        changing it MUST change the cache key - a cache hit would silently keep
+        the stale demand profile until the next structural rebuild.
+        start_temperature stays excluded (updated via update_thermal_start_temps)."""
+        base = copy.deepcopy(self.optim_conf)
+        base["shared_thermal_tanks"] = [
+            {
+                "id": "dhw",
+                "load_ids": [0],
+                "volume": 0.2,
+                "start_temperature": 50.0,
+                "draw_off_demand": [0.15] * 48,
+            }
+        ]
+        key1 = OptimizationCache._compute_cache_key(
+            base, self.plant_conf, self.costfun, self.retrieve_hass_conf
+        )
+        changed = copy.deepcopy(base)
+        changed["shared_thermal_tanks"][0]["draw_off_demand"] = [0.30] * 48
+        key2 = OptimizationCache._compute_cache_key(
+            changed, self.plant_conf, self.costfun, self.retrieve_hass_conf
+        )
+        self.assertNotEqual(key1, key2, "draw_off_demand change must force a rebuild")
+        warm = copy.deepcopy(base)
+        warm["shared_thermal_tanks"][0]["start_temperature"] = 55.0
+        key3 = OptimizationCache._compute_cache_key(
+            warm, self.plant_conf, self.costfun, self.retrieve_hass_conf
+        )
+        self.assertEqual(key1, key3, "start_temperature stays runtime-updatable (no rebuild)")
+
     def test_cache_key_tracks_thermal_source_block(self):
         """A thermal_source block (shared-tank source) must be hashed into the
         cache key: its fields (max_supply_temperature, COP parameters) are baked
