@@ -67,6 +67,11 @@ class ThermalDPParams:
     hx_approach: float = 5.0  # condenser runs at store_temp + approach
     cop_bounds: tuple[float, float] = (1.0, 8.0)
     hp_max_power: float = 3.0  # kW electric
+    # Optional rated thermal-output ceiling (kW thermal). hp_max_power * COP is
+    # electrical headroom, not what the compressor can physically move: on a
+    # mild day a high COP would otherwise let the DP plan deliveries far above
+    # the unit's rating (mirrors the LP's per-source max_thermal_power cap).
+    max_thermal_power: float | None = None
     backup_price: float = 0.10  # commodity price of the backup per kWh input
     backup_efficiency: float = 0.95
     backup_max_power: float = 0.0  # kW input; 0 disables the backup
@@ -188,7 +193,11 @@ def solve_thermal_dp(
         np.where(lift > 1e-6, carnot, p.cop_bounds[0]), *p.cop_bounds
     )  # (N, nt): cop2d[t, j] = COP to charge to grid[j] at step t
     hp_cap_th = p.hp_max_power * cop2d * dt  # (N, nt) thermal kWh the HP delivers reaching j
-    qin_max = (p.hp_max_power * cop2d + p.backup_max_power * p.backup_efficiency) * dt  # (N, nt)
+    if p.max_thermal_power is not None:
+        # The compressor's rated thermal output binds before electrical * COP does
+        # whenever the COP is high - the same physical ceiling the LP enforces.
+        hp_cap_th = np.minimum(hp_cap_th, p.max_thermal_power * dt)
+    qin_max = hp_cap_th + p.backup_max_power * p.backup_efficiency * dt  # (N, nt)
     # Standing loss per step and per state: (N, nt). Negative entries (store colder
     # than ambient) are a passive gain - handled by the surplus slack below.
     loss = p.loss_coeff * (grid[None, :] - amb[:, None]) * dt
