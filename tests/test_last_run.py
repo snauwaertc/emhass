@@ -45,6 +45,41 @@ def test_record_then_read_round_trip(data_path):
     assert "emhass_version" in snap
 
 
+@pytest.mark.parametrize(
+    "status",
+    ["Optimal (Relaxed)", "Optimal (Incumbent)", "Optimal_Inaccurate"],
+)
+def test_record_accepted_optimal_variants_map_to_ok(data_path, status):
+    """The relaxed-LP fallback, the time-limited-incumbent path, and CVXPY's
+    optimal_inaccurate all publish a plan with an 'Optimal...' variant status:
+    these are healthy runs and must not be reported as errors to health checks."""
+    last_run.record(
+        data_path,
+        action="dayahead-optim",
+        stage_times={},
+        optim_status=status,
+        infeasible=False,
+        duration_total_seconds=1.0,
+        schema_version="1.0",
+    )
+    snap = last_run.read(data_path)
+    assert snap["status"] == "ok"
+
+
+def test_record_unknown_status_still_maps_to_error(data_path):
+    """Guard the deliberate default-to-error for genuinely unrecognised statuses."""
+    last_run.record(
+        data_path,
+        action="dayahead-optim",
+        stage_times={},
+        optim_status="User_Limit",
+        infeasible=False,
+        duration_total_seconds=1.0,
+        schema_version="1.0",
+    )
+    assert last_run.read(data_path)["status"] == "error"
+
+
 def test_read_returns_none_when_no_run(data_path):
     assert last_run.read(data_path) is None
 
