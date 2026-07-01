@@ -44,20 +44,23 @@ def test_dp_prefers_heat_pump_when_genuinely_cheaper():
     assert backup_kwh < 0.10 * hp_kwh  # backup is negligible when the HP clearly wins
 
 
-def test_dp_cop_clamps_high_when_outdoor_above_supply():
-    """Sign-bug regression: when it is warmer outside than the condenser supply (a
-    low-temperature store on a hot day, so the temperature lift is <= 0), the heat
-    pump is maximally efficient and the COP must clamp to the UPPER bound - not
-    collapse to 1.0. A negative Carnot denominator previously clipped to cop_bounds[0]
-    (resistive), which under-valued the HP in warm weather. We recover the effective
-    COP from the energy balance (heat delivered / electricity drawn)."""
+def test_dp_cop_matches_canonical_floor_when_outdoor_above_supply():
+    """Consistency regression: when it is warmer outside than the condenser supply
+    (lift <= 0), the LP's canonical COP helper (utils.calculate_cop_heatpump) prices
+    the state at the neutral floor 1.0 - and the DP MUST price it the same way.
+    An earlier fix clamped this regime to the UPPER bound (the 'free heat' physical
+    reading), but that let the DP select trajectories through COP-8 states that the
+    LP re-solve then re-priced at COP 1.0, a self-inconsistent refinement (the DP's
+    whole purpose is COP/trajectory consistency with the re-solve). Consistency with
+    the executor wins over isolated physics. Effective COP is recovered from the
+    energy balance (heat delivered / electricity drawn)."""
     params = ThermalDPParams(
         heat_capacity=2.0,
         loss_coeff=0.0,
         min_temp=25.0,
         max_temp=30.0,
         hx_approach=5.0,        # supply = tank + 5 = 30..35 C
-        hp_max_power=3.0,
+        hp_max_power=6.0,       # enough electrical headroom at COP 1
         backup_max_power=0.0,   # only the HP can meet the demand
         demand_kw=2.0,
         cop_bounds=(1.0, 8.0),
@@ -70,7 +73,155 @@ def test_dp_cop_clamps_high_when_outdoor_above_supply():
     hp_elec = float(np.sum(res.hp_electric_per_step) * 0.5)
     assert hp_elec > 0, "the HP must run to meet the demand"
     eff_cop = heat_delivered / hp_elec
-    assert eff_cop > 4.0, f"effective COP {eff_cop:.2f} - sign bug clipped to the floor"
+    assert eff_cop < 1.5, (
+        f"effective COP {eff_cop:.2f} - non-physical lift must price at the canonical "
+        "floor (1.0) to stay consistent with the LP re-solve, not the upper bound"
+    )
+
+
+def test_dp_per_step_ambient_prices_loss_per_step():
+    """Standing loss must be priced against the per-step ambient, not a horizon
+    mean: on a cold-night/mild-day horizon the store coasts down faster at night.
+    (The LP's own tank dynamics use the per-step outdoor array; a mean-ambient DP
+    disagrees with the LP on exactly the diurnal-swing days it should refine.)"""
+    base = dict(
+        heat_capacity=1.0,
+        loss_coeff=0.2,     # strong loss so the effect is unambiguous
+        min_temp=20.0,
+        max_temp=60.0,
+        demand_kw=0.0,
+        backup_max_power=0.0,
+    )
+    n = 8
+    cold_then_warm = np.array([0.0] * 4 + [40.0] * 4)
+    # Expensive flat price + no demand -> optimal policy is (near-)pure coasting.
+    res = solve_thermal_dp(
+        np.full(n, 5.0),
+        outdoor_temperature=40.0,
+        params=ThermalDPParams(ambient_temperature=cold_then_warm, **base),
+        tank_start=40.0,
+    )
+    # Known quantization wart (predates per-step ambient): a coast landing between
+    # grid cells is rounded UP with paid heat, bounded by one cell (grid_step * hc)
+    # thermal per step. With COP >= 1, electric energy <= that thermal pad. Allow
+    # the pad, nothing more - real dispatch would be far larger.
+    hp_elec_kwh = float(np.sum(res.hp_electric_per_step)) * 0.5
+    assert hp_elec_kwh <= 4 * 0.5 * base["heat_capacity"] + 1e-6, (
+        "HP energy exceeds the one-cell-per-step rounding pad: not coasting"
+    )
+    traj = res.tank_trajectory
+    drop_cold = traj[0] - traj[4]   # loss over the 4 cold steps
+    drop_warm = traj[4] - traj[8]   # loss over the 4 warm steps (ambient 40 >= tank)
+    assert drop_cold > drop_warm + 1.0, (
+        f"cold-step loss ({drop_cold:.2f} C) must exceed warm-step loss "
+        f"({drop_warm:.2f} C): per-step ambient is not being applied"
+    )
+
+
+def test_dp_negative_demand_warms_store_for_free():
+    """A negative demand step (net solar/window gain) is free heat the store can
+    BANK against later demand - not zero demand (the old clamp). The gain steps
+    provide 4 kWh; the final demand needs 4 kWh but only 2 kWh is drainable from
+    storage (min_temp), so without the gain the HP must buy the difference."""
+    def run(with_gain: bool):
+        gain = -2.0 if with_gain else 0.0
+        params = ThermalDPParams(
+            heat_capacity=1.0,
+            loss_coeff=0.0,
+            min_temp=28.0,
+            max_temp=60.0,
+            demand_kw=np.array([0.0, 0.0] + [gain] * 4 + [4.0, 4.0]),
+            backup_max_power=0.0,
+        )
+        # Price so high the HP only runs when physically forced.
+        return solve_thermal_dp(
+            np.full(8, 5.0), outdoor_temperature=10.0, params=params, tank_start=30.0
+        )
+
+    banked = run(with_gain=True)
+    assert not banked.meta["infeasible"]
+    assert float(np.sum(banked.hp_electric_per_step)) < 1e-9, (
+        "banked free gain plus storage covers the demand - the HP must stay off"
+    )
+    # Load-bearing control: without the gain the same demand forces the HP on.
+    control = run(with_gain=False)
+    assert not control.meta["infeasible"]
+    assert float(np.sum(control.hp_electric_per_step)) > 0.1, (
+        "control must need the HP, else the gain assertion proves nothing"
+    )
+
+    # Sub-grid-cell gain (0.2 kWh/step < the 0.5 kWh cell): representable only by
+    # shedding the surplus while coasting. Without the surplus slack the DP's only
+    # feasible moves are a PAID jump to the next grid cell or infeasibility - the
+    # optimizer must never buy heat to 'absorb' free gain.
+    params_sub = ThermalDPParams(
+        heat_capacity=1.0,
+        loss_coeff=0.0,
+        min_temp=20.0,
+        max_temp=60.0,
+        demand_kw=np.full(8, -0.4),
+        backup_max_power=0.0,
+    )
+    res_sub = solve_thermal_dp(
+        np.full(8, 5.0), outdoor_temperature=10.0, params=params_sub, tank_start=30.0
+    )
+    assert not res_sub.meta["infeasible"]
+    assert float(np.sum(res_sub.hp_electric_per_step)) < 1e-9, (
+        "sub-cell gain must never force the HP to buy heat"
+    )
+
+
+def test_dp_negative_demand_at_max_temp_stays_feasible():
+    """Surplus gain with the store already at its ceiling must shed the excess
+    (the physical tank saturates), not declare the whole horizon infeasible."""
+    params = ThermalDPParams(
+        heat_capacity=1.0,
+        loss_coeff=0.0,
+        min_temp=20.0,
+        max_temp=40.0,
+        demand_kw=np.full(6, -3.0),  # relentless gain
+        backup_max_power=0.0,
+    )
+    res = solve_thermal_dp(np.full(6, 5.0), outdoor_temperature=10.0, params=params, tank_start=40.0)
+    assert not res.meta["infeasible"]
+    assert float(np.sum(res.hp_electric_per_step)) < 1e-9
+
+
+def test_dp_gain_slack_cannot_mine_phantom_transfer_heat():
+    """The surplus-dump slack must be bounded by the actual free inflow: a coupled
+    store kept alive by transfers must still be paid for with real heat-pump energy
+    (energy conservation), not phantom heat dumped through the slack."""
+    params = ThermalDPParams(
+        heat_capacity=1.0,
+        loss_coeff=0.0,
+        min_temp=20.0,
+        max_temp=60.0,
+        demand_kw=0.0,          # NO free inflow anywhere
+        backup_max_power=0.0,
+        coupled_heat_capacity=10.0,
+        coupled_loss_coeff=0.5,  # the coupled store bleeds and must be fed
+        coupled_min_temp=25.0,
+        coupled_max_temp=30.0,
+        coupling_coeff=5.0,
+        coupling_max_power=20.0,
+    )
+    n = 8
+    res = solve_thermal_dp(
+        np.full(n, 0.20),
+        outdoor_temperature=5.0,
+        params=params,
+        tank_start=40.0,
+        coupled_start=27.0,
+    )
+    assert not res.meta["infeasible"]
+    # The coupled store's standing loss over the horizon must be covered by real
+    # energy: HP electricity * COP + stored heat drawn from the feeder tank.
+    hp_kwh_elec = float(np.sum(res.hp_electric_per_step) * 0.5)
+    tank_drain = params.heat_capacity * (res.tank_trajectory[0] - res.tank_trajectory[-1])
+    assert hp_kwh_elec * 8.0 + tank_drain > 1.0, (
+        "coupled-store losses were fed with phantom heat: no HP energy was spent "
+        "and the feeder tank did not drain"
+    )
 
 
 def test_dp_solves_quickly():

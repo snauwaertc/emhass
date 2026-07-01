@@ -51,7 +51,11 @@ class ThermalDPParams:
     min_temp: float = 25.0
     max_temp: float = 65.0
     grid_step: float = 0.5
-    ambient_temperature: float = 20.0  # reference the standing loss is taken against
+    # Reference BOTH stores' standing loss is taken against. Scalar, or a per-step
+    # array so a diurnal swing (cold night / mild day) prices loss per step exactly
+    # like the LP's own tank dynamics do - a horizon mean disagrees with the LP on
+    # precisely the swing days the DP exists to refine.
+    ambient_temperature: float | np.ndarray = 20.0
 
     # Heat pump charging the store, plus an optional flat-efficiency backup source.
     # mode "heat": the unit ADDS heat, condenser runs at store_temp + approach, charging
@@ -77,7 +81,9 @@ class ThermalDPParams:
     coupling_max_power: float = 20.0  # kW
     coupling_levels: int = 11
 
-    # External demand drawn directly from the heat-pump store.
+    # External demand drawn directly from the heat-pump store. May be negative
+    # (a net solar/window gain): free heat that warms the store; any surplus the
+    # discretized state cannot absorb is shed at zero cost, never purchased away.
     demand_kw: float | np.ndarray = 0.0
 
 
@@ -130,7 +136,16 @@ def solve_thermal_dp(
     if len(outdoor_arr) < N:  # forward-fill a short outdoor series to the horizon
         outdoor_arr = np.concatenate([outdoor_arr, np.full(N - len(outdoor_arr), outdoor_arr[-1])])
     outdoor_arr = outdoor_arr[:N]
-    outdoor_ref = float(np.mean(outdoor_arr))
+    # Ambient reference for standing loss: scalar or per-step (forward-filled like
+    # the outdoor series), so loss is priced per step exactly as the LP prices it.
+    amb = (
+        np.full(N, float(p.ambient_temperature))
+        if np.ndim(p.ambient_temperature) == 0
+        else np.asarray(p.ambient_temperature, dtype=float)
+    )
+    if len(amb) < N:
+        amb = np.concatenate([amb, np.full(N - len(amb), amb[-1])])
+    amb = amb[:N]
     demand = p.demand_kw if np.ndim(p.demand_kw) else np.full(N, float(p.demand_kw))
     demand = np.broadcast_to(demand, (N,))
 
@@ -156,9 +171,12 @@ def solve_thermal_dp(
     # (grid - approach) to extract heat. The Carnot COP pays for the lift between the hot and
     # cold sides: condenser - outdoor (heat) or outdoor - evaporator (cool). A vanishing or
     # negative lift (heat: outdoor >= supply, a low store on a hot day; cool: outdoor <=
-    # supply, a chilled store on a cold day) is the maximally-efficient / free regime, so it
-    # clamps to the UPPER bound - a negative Carnot denominator must NOT clip to the
-    # resistive floor (cop_bounds[0]).
+    # supply, a chilled store on a cold day) clamps to the resistive FLOOR
+    # (cop_bounds[0]) to match the canonical LP helper (utils.calculate_cop_heatpump),
+    # which prices non-physical lift at the neutral 1.0. The physically tempting
+    # "free heat" upper clamp was tried and reverted: the DP then routed trajectories
+    # through states the LP re-solve re-priced ~8x more expensive - a self-
+    # inconsistent refinement. Consistency with the executor wins.
     if p.mode == "cool":
         supply = grid - p.hx_approach  # (nt,) cold evaporator side
         lift = outdoor_arr[:, None] - supply[None, :]  # (N, nt) outdoor - evaporator
@@ -167,11 +185,13 @@ def solve_thermal_dp(
         lift = supply[None, :] - outdoor_arr[:, None]  # (N, nt) condenser - source
     carnot = p.carnot_efficiency * (supply[None, :] + 273.15) / np.where(lift > 1e-6, lift, 1e-6)
     cop2d = np.clip(
-        np.where(lift > 1e-6, carnot, p.cop_bounds[1]), *p.cop_bounds
+        np.where(lift > 1e-6, carnot, p.cop_bounds[0]), *p.cop_bounds
     )  # (N, nt): cop2d[t, j] = COP to charge to grid[j] at step t
     hp_cap_th = p.hp_max_power * cop2d * dt  # (N, nt) thermal kWh the HP delivers reaching j
     qin_max = (p.hp_max_power * cop2d + p.backup_max_power * p.backup_efficiency) * dt  # (N, nt)
-    loss = p.loss_coeff * (grid - p.ambient_temperature) * dt
+    # Standing loss per step and per state: (N, nt). Negative entries (store colder
+    # than ambient) are a passive gain - handled by the surplus slack below.
+    loss = p.loss_coeff * (grid[None, :] - amb[:, None]) * dt
     cp_backup = p.backup_price / p.backup_efficiency
 
     use_coupled = p.coupled_heat_capacity is not None
@@ -191,7 +211,9 @@ def solve_thermal_dp(
         else:
             cgrid = np.array([p.coupled_min_temp])
         ncl = len(cgrid)
-        closs = p.coupled_loss_coeff * (cgrid - outdoor_ref) * dt
+        # Coupled-store standing loss, per step and per state: (N, ncl) - against the
+        # same per-step ambient as the primary store.
+        closs = p.coupled_loss_coeff * (cgrid[None, :] - amb[:, None]) * dt
         qxf_levels = np.linspace(0.0, p.coupling_max_power * dt, p.coupling_levels)
     else:
         cgrid = np.array([0.0])
@@ -221,18 +243,27 @@ def solve_thermal_dp(
         Vn = np.full((nt, ncl), INF)
         best_j = np.zeros((nt, ncl), np.int16)
         best_q = np.zeros((nt, ncl), np.int16)
+        # Surplus free inflow per current state (nt,): when the net external term is
+        # negative (solar/window gain beyond losses, or a store colder than ambient),
+        # the discretized state may be unable to absorb it - e.g. a sub-grid-cell
+        # gain makes even coasting need Qin < 0. Allow shedding EXACTLY that surplus
+        # at zero cost (cheapest() already prices max(Qin, 0)): the physical store
+        # just warms within its cell / saturates at its ceiling. Bounding the slack
+        # by the actual free inflow is what keeps energy conserved - a universal
+        # slack would let coupled-store transfers be fed with phantom heat.
+        surplus = np.maximum(0.0, -(demand[t] * dt + sc * loss[t]))
         for j in range(nt):
             # Energy the unit must move to reach target j from each current state. Heat
             # (sc=+1): Qin to ADD = (grid[j]-grid)*hc + demand + loss. Cool (sc=-1): Qin to
             # REMOVE = (grid-grid[j])*hc + demand - loss, i.e. sc flips the temperature
             # delta and the passive-loss term while the demand stays a positive load.
-            base = sc * (grid[j] - grid) * p.heat_capacity + demand[t] * dt + sc * loss
+            base = sc * (grid[j] - grid) * p.heat_capacity + demand[t] * dt + sc * loss[t]
             for qi, qxf in enumerate(qxf_levels):
                 Qin = base + qxf
                 cost = cheapest(Qin, t, j)
-                feas_t = (Qin >= -1e-9) & (Qin <= qin_max[t, j] + 1e-9)
+                feas_t = (Qin >= -surplus - 1e-9) & (Qin <= qin_max[t, j] + 1e-9)
                 if use_coupled:
-                    Tc2 = cgrid + (qxf - closs) / p.coupled_heat_capacity
+                    Tc2 = cgrid + (qxf - closs[t]) / p.coupled_heat_capacity
                     feas_c = (Tc2 >= cgrid[0] - 1e-9) & (Tc2 <= cgrid[-1] + 1e-9)
                     Vnext = np.interp(Tc2, cgrid, V[j, :])
                     # Conductance limits the transfer to coupling_coeff*(T_from-T_to), but
@@ -277,7 +308,7 @@ def solve_thermal_dp(
         qxf = qxf_levels[int(POL[t, it, ic, 1])]
         Qin = max(
             0.0,
-            sc * (grid[j] - grid[it]) * p.heat_capacity + demand[t] * dt + sc * loss[it] + qxf,
+            sc * (grid[j] - grid[it]) * p.heat_capacity + demand[t] * dt + sc * loss[t, it] + qxf,
         )
         cop_ij = cop2d[t, j]  # COP to reach the target temperature grid[j]
         if price[t] / cop_ij <= cp_backup:
@@ -290,7 +321,7 @@ def solve_thermal_dp(
         hp_draw[t] = qhp / cop_ij / dt
         bk_draw[t] = qbk / p.backup_efficiency / dt
         if use_coupled:
-            Tc2 = cgrid[ic] + (qxf - closs[ic]) / p.coupled_heat_capacity
+            Tc2 = cgrid[ic] + (qxf - closs[t, ic]) / p.coupled_heat_capacity
             ic = int(np.argmin(np.abs(cgrid - Tc2)))
             ctraj.append(cgrid[ic])
         it = j
