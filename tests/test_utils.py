@@ -3924,7 +3924,12 @@ class TestResolveThermalBatteryCopHeatingCurve(unittest.TestCase):
                     "type": "heatpump",
                     "carnot_efficiency": 0.35,
                     "nominal_power": 2100,
-                    "cooling_curve": {"slope": 0.3, "offset": 20, "min_supply": 8, "max_supply": 18},
+                    "cooling_curve": {
+                        "slope": 0.3,
+                        "offset": 20,
+                        "min_supply": 8,
+                        "max_supply": 18,
+                    },
                 }
             ],
             "storage": [
