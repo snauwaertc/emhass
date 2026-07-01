@@ -214,13 +214,23 @@ def test_dp_gain_slack_cannot_mine_phantom_transfer_heat():
         coupled_start=27.0,
     )
     assert not res.meta["infeasible"]
-    # The coupled store's standing loss over the horizon must be covered by real
-    # energy: HP electricity * COP + stored heat drawn from the feeder tank.
-    hp_kwh_elec = float(np.sum(res.hp_electric_per_step) * 0.5)
+    # Energy conservation: everything the tank sent into the coupled store
+    # (its temperature change plus its standing losses, reconstructed from the
+    # realized states) must be covered by real sources - HP heat (<= elec * COP
+    # upper bound) plus heat drained from the feeder tank. Note the coupled
+    # store may also legally coast down on its OWN bank (that shows up as a
+    # negative temperature-change term), so only the net transfer is bounded.
+    ctraj = res.coupled_trajectory
+    closs_paid = float(
+        sum(params.coupled_loss_coeff * (c - 20.0) * 0.5 for c in ctraj[:-1])
+    )  # loss_coeff * (T - default ambient 20) * dt, at each realized state
+    qxf_total = params.coupled_heat_capacity * (ctraj[-1] - ctraj[0]) + closs_paid
+    hp_thermal_ub = float(np.sum(res.hp_electric_per_step) * 0.5) * 8.0  # COP <= 8
     tank_drain = params.heat_capacity * (res.tank_trajectory[0] - res.tank_trajectory[-1])
-    assert hp_kwh_elec * 8.0 + tank_drain > 1.0, (
-        "coupled-store losses were fed with phantom heat: no HP energy was spent "
-        "and the feeder tank did not drain"
+    assert qxf_total <= hp_thermal_ub + max(tank_drain, 0.0) + 1.0, (
+        f"transfers into the coupled store ({qxf_total:.2f} kWh) exceed the real "
+        f"energy available (HP <= {hp_thermal_ub:.2f} + tank drain "
+        f"{max(tank_drain, 0.0):.2f} kWh): phantom heat"
     )
 
 
