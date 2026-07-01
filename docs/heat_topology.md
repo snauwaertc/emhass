@@ -146,14 +146,23 @@ limits.
 "sources": [
   { "id": "hp", "type": "heatpump", "nominal_power": 5700,
     "heating_curve": { "slope": 0.7, "offset": 38 },
-    "carnot_efficiency": 0.46, "max_thermal_power": 15000 }
+    "carnot_efficiency": 0.46, "max_thermal_power": 15000,
+    "treat_as_semi_cont": false }
 ]
 ```
 
-> **Caveat:** combining a nonzero `min_power` with a tight `max_thermal_power` on a
-> variable-COP source can be infeasible on a mild day - if `cop * min_power` exceeds
-> `max_thermal_power` at some step, the source cannot run at all there. This surfaces as
-> an infeasible solver status, not a silent wrong answer.
+> **Known limitation - use `treat_as_semi_cont: false` on a capped source.** A binding
+> `max_thermal_power` on a *semi-continuous* load (`treat_as_semi_cont: true`, the
+> default) currently makes the solver abandon the source entirely (drop it to 0) rather
+> than throttle it - the cap constraint interacts badly with the on/off binary's Big-M.
+> Model a capped heat pump as **continuous** (`treat_as_semi_cont: false`) until this is
+> fixed; the cap then throttles it correctly. The continuous model gives up the modulation
+> floor (`min_power`), which is a minor loss for a finely-modulating inverter unit.
+>
+> **Caveat:** a nonzero `min_power` with a tight `max_thermal_power` on a variable-COP
+> source can also be infeasible on a mild day - if `cop * min_power` exceeds
+> `max_thermal_power` at some step the source cannot run there, surfacing as an infeasible
+> solver status.
 
 ### `storage`
 

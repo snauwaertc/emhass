@@ -4553,19 +4553,23 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
 
     @unittest.expectedFailure
     def test_repro_max_thermal_power_hp_not_abandoned(self):
-        """KNOWN BUG (max_thermal_power): when a binding max_thermal_power meets a
-        SOFT comfort target, the solver returns an 'Optimal' plan that abandons a
-        cheap high-COP heat pump (HP -> 0) and eats the full comfort penalty,
-        even though heating is feasible (see the hard-min case in
-        test_max_thermal_power_caps_heat_pump_under_high_cop, which passes).
+        """KNOWN BUG (max_thermal_power x semi-continuous load): a binding
+        max_thermal_power on a load with treat_as_semi_cont=True (the compiler
+        default) makes the solver return an 'Optimal' plan that abandons a cheap
+        high-COP heat pump (HP -> 0) rather than throttle it, eating the full
+        soft-comfort penalty even though heating is feasible.
 
-        Reproduces the live-Pi finding: uncapped the HP heats toward the target;
-        capped it drops to 0 and the tank coasts cold. On an exact solve the full
-        objective returned is ~50x worse (e.g. -4.7e6 vs a feasible ~-9.2e4),
-        i.e. the cap constraint makes the good solution effectively unreachable
-        by the solver (interaction with the q_input thermal-inertia recursion /
-        min-temperature ramping). Marked expectedFailure until root-caused; do
-        NOT ship max_thermal_power on soft-comfort topologies until fixed.
+        ROOT CAUSE (confirmed): the `cop * p <= cap` constraint interacting with
+        the semi-continuous on/off binary (p <= nominal * z, Big-M = nominal).
+        With treat_as_semi_cont=False (continuous load) the SAME cap throttles
+        the HP correctly - see test_max_thermal_power_caps_heat_pump_under_high_cop,
+        which passes precisely because its fixture sets semi_cont=False. On an
+        exact solve the semi-cont case returns a full objective ~50x worse
+        (-4.7e6 vs a feasible ~-9.2e4).
+
+        WORKAROUND: model a capped source as continuous (treat_as_semi_cont=False).
+        Marked expectedFailure until the cap is made compatible with the
+        semi-continuous binary (likely tighten the Big-M to min(nominal, cap/cop)).
         """
         _, res0 = self._run_hp_curve_soft_comfort(max_thermal_power=None)
         _, res1 = self._run_hp_curve_soft_comfort(max_thermal_power=15000)
