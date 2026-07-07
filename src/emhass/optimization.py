@@ -3127,6 +3127,18 @@ class Optimization:
                 continue
             p_k = self.vars["p_deferrable"][k]
             constraints.append(cp.multiply(cops, p_k) <= float(thermal_cap))
+            # A semi-continuous member's ON level must come down with the cap:
+            # its convention is the strict p == ON_level * bin equality, so with
+            # the plain nominal a binding cap (cap/COP < nominal) leaves OFF as
+            # the only feasible state and the source is silently abandoned.
+            # Lower the ON level to min(nominal, cap/COP) per step - the unit
+            # runs flat-out against whichever limit binds.
+            on_level = getattr(self, "_semi_cont_on_level", {}).get(k)
+            if on_level is not None:
+                cop_vals = np.asarray(cops.value if hasattr(cops, "value") else cops, dtype=float)
+                on_level.value = np.minimum(
+                    on_level.value, float(thermal_cap) / np.maximum(cop_vals, 1e-9)
+                )
 
         # Soft comfort constraints (issue #539): the tank's desired_temperatures
         # set a comfort target whose shortfall is penalized in the objective
@@ -3573,6 +3585,22 @@ class Optimization:
                 hp["cop_param"].value = utils.cop_from_tank_temperature(
                     end_temp, hp["carnot"], outdoor_arr, approach=hp["approach"], mode=sense
                 )
+                # The semi-continuous ON level follows the COP: re-derive
+                # min(nominal, cap/COP) with the refined values, else the
+                # re-solve's strict p == ON_level * bin equality would pin the
+                # ON state to a power the (new) thermal cap no longer allows.
+                cap_w = hp.get("max_thermal_power")
+                on_level = getattr(self, "_semi_cont_on_level", {}).get(hp["load_idx"])
+                if cap_w and on_level is not None:
+                    base = np.broadcast_to(
+                        np.asarray(
+                            self.optim_conf["nominal_power_of_deferrable_loads"][hp["load_idx"]],
+                            dtype=float,
+                        ),
+                        on_level.shape,
+                    )
+                    new_cop = np.asarray(hp["cop_param"].value, dtype=float)[: on_level.size]
+                    on_level.value = np.minimum(base, float(cap_w) / np.maximum(new_cop, 1e-9))
                 # Bound the re-solve to the DP's priced temperature range so it cannot
                 # exploit the un-priced region beyond it. Cool: floor the re-solve at the
                 # DP's TROUGH (the coldest it priced) - super-cooling below it would run on
@@ -3664,6 +3692,10 @@ class Optimization:
         q_inputs = {}
         penalty_terms_total = 0
         n = self.num_timesteps
+        # Per-step semi-continuous ON level per load (a cp.Parameter defaulting to
+        # nominal). The shared-tank builder lowers it for thermal-capped sources,
+        # and the DP COP refinement re-derives it when it re-values the COP.
+        self._semi_cont_on_level: dict[int, cp.Parameter] = {}
 
         # Compute shared-tank membership once. Used by the per-load loop to
         # skip loads that belong to a shared tank (handled after the loop)
@@ -4118,10 +4150,26 @@ class Optimization:
                                 + M_timesteps * (1 - self.param_timesteps_active[k])
                             )
 
-                    # Semi-continuous
+                    # Semi-continuous. EMHASS's convention is the strict equality
+                    # p == ON_level * bin (ON means running at exactly the ON level,
+                    # not modulating). The ON level is a per-step Parameter that
+                    # defaults to nominal; for a thermal load with max_thermal_power
+                    # the shared-tank builder (which runs after this loop and knows
+                    # the per-step COP) lowers it to min(nominal, cap/COP) - a real
+                    # unit at its thermal ceiling runs flat-out against whichever
+                    # limit binds. With a plain nominal equality, a binding cap
+                    # (cap/COP < nominal) would make OFF the only feasible state
+                    # and silently abandon the source.
                     if is_semi_cont:
                         nominal = self.optim_conf["nominal_power_of_deferrable_loads"][k]
-                        constraints.append(p_deferrable[k] == nominal * p_def_bin1[k])
+                        on_level = cp.Parameter(
+                            n,
+                            nonneg=True,
+                            name=f"semi_cont_on_level_{k}",
+                            value=np.broadcast_to(np.asarray(nominal, dtype=float), n).copy(),
+                        )
+                        self._semi_cont_on_level[k] = on_level
+                        constraints.append(p_deferrable[k] == cp.multiply(on_level, p_def_bin1[k]))
                         constraints.append(p_def_bin1[k] == p_def_bin2[k])
 
             else:

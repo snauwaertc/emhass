@@ -4551,33 +4551,50 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
         return opt, res
 
-    @unittest.expectedFailure
     def test_repro_max_thermal_power_hp_not_abandoned(self):
-        """KNOWN BUG (max_thermal_power x semi-continuous load): a binding
-        max_thermal_power on a load with treat_as_semi_cont=True (the compiler
-        default) makes the solver return an 'Optimal' plan that abandons a cheap
-        high-COP heat pump (HP -> 0) rather than throttle it, eating the full
-        soft-comfort penalty even though heating is feasible.
+        """Regression (max_thermal_power x semi-continuous load): EMHASS's
+        semi-continuous convention is the strict equality p == nominal * bin -
+        ON means EXACTLY nominal power. A binding max_thermal_power forces
+        p <= cap/COP < nominal at high-COP steps, which made OFF the only
+        feasible state: the solver returned an 'Optimal' plan that abandoned a
+        cheap high-COP heat pump entirely (objective ~50x worse than the
+        feasible heating plan) rather than throttle it.
 
-        ROOT CAUSE (confirmed): the `cop * p <= cap` constraint interacting with
-        the semi-continuous on/off binary (p <= nominal * z, Big-M = nominal).
-        With treat_as_semi_cont=False (continuous load) the SAME cap throttles
-        the HP correctly - see test_max_thermal_power_caps_heat_pump_under_high_cop,
-        which passes precisely because its fixture sets semi_cont=False. On an
-        exact solve the semi-cont case returns a full objective ~50x worse
-        (-4.7e6 vs a feasible ~-9.2e4).
-
-        WORKAROUND: model a capped source as continuous (treat_as_semi_cont=False).
-        Marked expectedFailure until the cap is made compatible with the
-        semi-continuous binary (likely tighten the Big-M to min(nominal, cap/cop)).
-        """
+        The fix keeps the on/off convention but caps the ON level itself:
+        p == bin * min(nominal, cap/COP) per step - a real heat pump at its
+        thermal ceiling runs flat-out against whichever limit binds. The
+        capped semi-continuous HP must therefore RUN (not be abandoned) and
+        its delivered heat must respect the cap at every step."""
         _, res0 = self._run_hp_curve_soft_comfort(max_thermal_power=None)
         _, res1 = self._run_hp_curve_soft_comfort(max_thermal_power=15000)
         self.assertGreater(
             res0["P_deferrable0"].sum(), 0, "control: uncapped HP heats toward the soft target"
         )
         self.assertGreater(
-            res1["P_deferrable0"].sum(), 0, "BUG: capped HP abandoned despite cheap COP-8 slots"
+            res1["P_deferrable0"].sum(), 0, "capped HP abandoned despite cheap COP-8 slots"
+        )
+        # Delivered heat respects the cap at every step (COP 8 at 20 C outdoor
+        # with the 28 C curve supply; 15 kW cap -> at most 1875 W electrical ON).
+        cop = np.asarray(
+            utils.resolve_thermal_battery_cop(
+                {
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 38,
+                        "min_supply": 28,
+                        "max_supply": 70,
+                    },
+                    "carnot_efficiency": 0.46,
+                },
+                [20.0] * 48,
+                length=48,
+            )
+        )
+        thermal = cop * res1["P_deferrable0"].reset_index(drop=True).to_numpy()
+        self.assertLessEqual(
+            thermal.max(),
+            15000.0 + 1e-3,
+            "ON-state delivered heat must respect max_thermal_power",
         )
 
     def test_max_thermal_power_caps_heat_pump_under_high_cop(self):
