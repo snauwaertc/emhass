@@ -176,3 +176,10 @@ turning it up.
 - `historic_days_to_retrieve`: each day fetched is one HA recorder call per
   sensor. Default 2 days is fine; bumping to 5+ for a long-window forecast
   model can add real time on a Pi behind cellular/Tailscale.
+- `cop_solver`: for shared thermal tanks fed by a curve-driven heat pump,
+  `auto` adds a post-solve dynamic-programming COP refinement and, when it
+  finds an inconsistency, a second (warm-started, half-budget) MILP solve -
+  worthwhile plan quality on thermal-heavy setups, but extra wall-clock on
+  every cycle where it triggers. The default `static` keeps the constant
+  heating-curve COP and never re-solves. See
+  [the heat topology docs](heat_topology.md) for when refinement matters.
