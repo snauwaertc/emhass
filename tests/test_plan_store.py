@@ -158,9 +158,7 @@ class TestRecordOptimSnapshotWritesPlan(unittest.TestCase):
             with self.subTest(status=status):
                 idx = pd.to_datetime(["2026-06-17T00:00:00+00:00"], utc=True)
                 idx.name = "timestamp"
-                opt_res = pd.DataFrame(
-                    {"P_Load": [100.0 + i], "optim_status": [status]}, index=idx
-                )
+                opt_res = pd.DataFrame({"P_Load": [100.0 + i], "optim_status": [status]}, index=idx)
                 input_data_dict = {
                     "emhass_conf": {"data_path": self.tmp_path},
                     "stage_times": {},
@@ -174,7 +172,5 @@ class TestRecordOptimSnapshotWritesPlan(unittest.TestCase):
                 )
                 self.assertEqual(last_run.read(self.tmp_path)["status"], "ok")
                 plan = plan_store.read(self.tmp_path)
-                self.assertIsNotNone(
-                    plan, f"{status}: last-run says ok but no plan was published"
-                )
+                self.assertIsNotNone(plan, f"{status}: last-run says ok but no plan was published")
                 self.assertEqual(plan["plan"][0]["P_Load"], 100.0 + i)

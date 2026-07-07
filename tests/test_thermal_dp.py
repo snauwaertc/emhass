@@ -59,9 +59,9 @@ def test_dp_cop_matches_canonical_floor_when_outdoor_above_supply():
         loss_coeff=0.0,
         min_temp=25.0,
         max_temp=30.0,
-        hx_approach=5.0,        # supply = tank + 5 = 30..35 C
-        hp_max_power=6.0,       # enough electrical headroom at COP 1
-        backup_max_power=0.0,   # only the HP can meet the demand
+        hx_approach=5.0,  # supply = tank + 5 = 30..35 C
+        hp_max_power=6.0,  # enough electrical headroom at COP 1
+        backup_max_power=0.0,  # only the HP can meet the demand
         demand_kw=2.0,
         cop_bounds=(1.0, 8.0),
     )
@@ -84,14 +84,14 @@ def test_dp_per_step_ambient_prices_loss_per_step():
     mean: on a cold-night/mild-day horizon the store coasts down faster at night.
     (The LP's own tank dynamics use the per-step outdoor array; a mean-ambient DP
     disagrees with the LP on exactly the diurnal-swing days it should refine.)"""
-    base = dict(
-        heat_capacity=1.0,
-        loss_coeff=0.2,     # strong loss so the effect is unambiguous
-        min_temp=20.0,
-        max_temp=60.0,
-        demand_kw=0.0,
-        backup_max_power=0.0,
-    )
+    base = {
+        "heat_capacity": 1.0,
+        "loss_coeff": 0.2,  # strong loss so the effect is unambiguous
+        "min_temp": 20.0,
+        "max_temp": 60.0,
+        "demand_kw": 0.0,
+        "backup_max_power": 0.0,
+    }
     n = 8
     cold_then_warm = np.array([0.0] * 4 + [40.0] * 4)
     # Expensive flat price + no demand -> optimal policy is (near-)pure coasting.
@@ -110,8 +110,8 @@ def test_dp_per_step_ambient_prices_loss_per_step():
         "HP energy exceeds the one-cell-per-step rounding pad: not coasting"
     )
     traj = res.tank_trajectory
-    drop_cold = traj[0] - traj[4]   # loss over the 4 cold steps
-    drop_warm = traj[4] - traj[8]   # loss over the 4 warm steps (ambient 40 >= tank)
+    drop_cold = traj[0] - traj[4]  # loss over the 4 cold steps
+    drop_warm = traj[4] - traj[8]  # loss over the 4 warm steps (ambient 40 >= tank)
     assert drop_cold > drop_warm + 1.0, (
         f"cold-step loss ({drop_cold:.2f} C) must exceed warm-step loss "
         f"({drop_warm:.2f} C): per-step ambient is not being applied"
@@ -123,6 +123,7 @@ def test_dp_negative_demand_warms_store_for_free():
     BANK against later demand - not zero demand (the old clamp). The gain steps
     provide 4 kWh; the final demand needs 4 kWh but only 2 kWh is drainable from
     storage (min_temp), so without the gain the HP must buy the difference."""
+
     def run(with_gain: bool):
         gain = -2.0 if with_gain else 0.0
         params = ThermalDPParams(
@@ -182,7 +183,9 @@ def test_dp_negative_demand_at_max_temp_stays_feasible():
         demand_kw=np.full(6, -3.0),  # relentless gain
         backup_max_power=0.0,
     )
-    res = solve_thermal_dp(np.full(6, 5.0), outdoor_temperature=10.0, params=params, tank_start=40.0)
+    res = solve_thermal_dp(
+        np.full(6, 5.0), outdoor_temperature=10.0, params=params, tank_start=40.0
+    )
     assert not res.meta["infeasible"]
     assert float(np.sum(res.hp_electric_per_step)) < 1e-9
 
@@ -196,7 +199,7 @@ def test_dp_gain_slack_cannot_mine_phantom_transfer_heat():
         loss_coeff=0.0,
         min_temp=20.0,
         max_temp=60.0,
-        demand_kw=0.0,          # NO free inflow anywhere
+        demand_kw=0.0,  # NO free inflow anywhere
         backup_max_power=0.0,
         coupled_heat_capacity=10.0,
         coupled_loss_coeff=0.5,  # the coupled store bleeds and must be fed
@@ -365,8 +368,11 @@ def test_dp_feasible_when_feeder_colder_than_coupled_store():
     # The feeder starts COLDER (25) than the coupled store (28): no uphill flow, but
     # the DP must still find the do-nothing policy rather than declaring infeasible.
     res = solve_thermal_dp(
-        np.full(8, 0.2), outdoor_temperature=10.0, params=params,
-        tank_start=25.0, coupled_start=28.0,
+        np.full(8, 0.2),
+        outdoor_temperature=10.0,
+        params=params,
+        tank_start=25.0,
+        coupled_start=28.0,
     )
     assert res.meta["infeasible"] is False
     assert np.isfinite(res.total_cost)
