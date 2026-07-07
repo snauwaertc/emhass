@@ -1,0 +1,105 @@
+{
+  "name": "fixed_supply_noop",
+  "hypothesis": "is_hp False -> DP no-op even though a HP is present.",
+  "limit_probed": "fixed-supply HP (constant COP, not DP-refinable)",
+  "pass_criteria": "auto feasible AND zero engaged.",
+  "auto": {
+    "ok": true,
+    "cop_solver": "auto",
+    "optim_status": "Optimal",
+    "feasible": true,
+    "tanks": {
+      "buffer": {
+        "start": 38.0,
+        "min": 35.0,
+        "max": 50.14,
+        "peak": 50.14,
+        "total_variation": 33.3,
+        "start_mismatch_c": 0.0
+      }
+    },
+    "band_violation_c": {
+      "buffer": 0.0
+    },
+    "max_band_violation_c": 0.0,
+    "match_warnings": [],
+    "grid_peak_import_w": 899.0,
+    "pv_export_kwh": 18.66,
+    "deferrable_kwh": {
+      "P_deferrable0": 0.77
+    },
+    "cost_proxy_eur": -0.3978,
+    "dp_events": {
+      "eligible": [],
+      "engaged": [],
+      "skipped": [],
+      "capped": [],
+      "failed": [],
+      "raw": []
+    },
+    "solve_seconds": 0.0
+  },
+  "static": {
+    "ok": true,
+    "cop_solver": "static",
+    "optim_status": "Optimal",
+    "feasible": true,
+    "tanks": {
+      "buffer": {
+        "start": 38.0,
+        "min": 35.0,
+        "max": 50.14,
+        "peak": 50.14,
+        "total_variation": 33.3,
+        "start_mismatch_c": 0.0
+      }
+    },
+    "band_violation_c": {
+      "buffer": 0.0
+    },
+    "max_band_violation_c": 0.0,
+    "match_warnings": [],
+    "grid_peak_import_w": 899.0,
+    "pv_export_kwh": 18.66,
+    "deferrable_kwh": {
+      "P_deferrable0": 0.77
+    },
+    "cost_proxy_eur": -0.3978,
+    "dp_events": {
+      "eligible": [],
+      "engaged": [],
+      "skipped": [],
+      "capped": [],
+      "failed": [],
+      "raw": []
+    },
+    "solve_seconds": 0.0
+  },
+  "delta": {
+    "cost_proxy_delta_eur": 0.0,
+    "grid_peak_delta_w": 0.0,
+    "dp_engaged_tanks": 0,
+    "dp_capped_tanks": 0,
+    "auto_max_band_violation_c": 0.0,
+    "static_max_band_violation_c": 0.0
+  },
+  "fair_delta": {
+    "basis": "both under TRUE COP (static schedule re-costed; auto already true)",
+    "recosted_hp_tanks": [],
+    "static_true": {
+      "peak_w": 899.0,
+      "energy_eur": -0.3978,
+      "capacity_eur": 0.0,
+      "total_eur": -0.3978
+    },
+    "auto_true": {
+      "peak_w": 899.0,
+      "energy_eur": -0.3978,
+      "capacity_eur": 0.0,
+      "total_eur": -0.3978
+    },
+    "cost_delta_eur": 0.0,
+    "peak_delta_w": 0.0,
+    "dp_helps_cost": true
+  }
+}

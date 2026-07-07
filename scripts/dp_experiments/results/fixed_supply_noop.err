@@ -1,0 +1,14 @@
+2026-06-17 17:17:35,026 - __main__ - INFO - config.json does not exist, or has not been passed. config parameters may default to config_defaults.json
+2026-06-17 17:17:35,026 - __main__ - INFO - you may like to generate the config.json file on the configuration page
+2026-06-17 17:17:35,039 - __main__ - WARNING - Some secret parameters values are still matching their defaults
+heat_topology.sources[hpfix] is a fixed-supply heat pump (supply_temperature=45 C) without max_supply_temperature: supply_temperature sets the COP only and is not enforced as a physical ceiling, so the optimiser may heat the tank above it. Set max_supply_temperature to cap the tank at the supply temperature.
+2026-06-17 17:17:35,071 - __main__ - INFO - heat_topology compiled: 1 sources, 1 storage, 1 flows, 0 groups
+2026-06-17 17:17:35,074 - __main__ - INFO - Building CVXPY problem structure...
+2026-06-17 17:17:35,122 - __main__ - INFO - Total value of the Cost function = 0.40
+2026-06-17 17:17:35,129 - __main__ - INFO - config.json does not exist, or has not been passed. config parameters may default to config_defaults.json
+2026-06-17 17:17:35,129 - __main__ - INFO - you may like to generate the config.json file on the configuration page
+2026-06-17 17:17:35,130 - __main__ - WARNING - Some secret parameters values are still matching their defaults
+heat_topology.sources[hpfix] is a fixed-supply heat pump (supply_temperature=45 C) without max_supply_temperature: supply_temperature sets the COP only and is not enforced as a physical ceiling, so the optimiser may heat the tank above it. Set max_supply_temperature to cap the tank at the supply temperature.
+2026-06-17 17:17:35,133 - __main__ - INFO - heat_topology compiled: 1 sources, 1 storage, 1 flows, 0 groups
+2026-06-17 17:17:35,134 - __main__ - INFO - Building CVXPY problem structure...
+2026-06-17 17:17:35,160 - __main__ - INFO - Total value of the Cost function = 0.40

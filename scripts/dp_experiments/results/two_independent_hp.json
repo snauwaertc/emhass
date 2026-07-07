@@ -1,0 +1,137 @@
+{
+  "name": "two_independent_hp",
+  "hypothesis": "Both buffers refine independently; one bad tank must not abort the other.",
+  "limit_probed": "two independent HP tanks (per-tank refinement + isolation)",
+  "pass_criteria": "auto feasible AND both tanks in band AND >=1 engaged.",
+  "auto": {
+    "ok": true,
+    "cop_solver": "auto",
+    "optim_status": "Optimal",
+    "feasible": true,
+    "tanks": {
+      "bufA": {
+        "start": 38.0,
+        "min": 35.0,
+        "max": 47.61,
+        "peak": 47.61,
+        "total_variation": 28.2,
+        "start_mismatch_c": 0.0
+      },
+      "bufB": {
+        "start": 40.0,
+        "min": 36.0,
+        "max": 48.61,
+        "peak": 48.61,
+        "total_variation": 29.2,
+        "start_mismatch_c": 0.0
+      }
+    },
+    "band_violation_c": {
+      "bufA": 0.0,
+      "bufB": 0.0
+    },
+    "max_band_violation_c": 0.0,
+    "match_warnings": [],
+    "grid_peak_import_w": 899.0,
+    "pv_export_kwh": 18.22,
+    "deferrable_kwh": {
+      "P_deferrable0": 0.71,
+      "P_deferrable1": 0.71
+    },
+    "cost_proxy_eur": -0.361,
+    "dp_events": {
+      "eligible": [
+        "DP COP solver (mode=auto): eligible heating-curve heat-pump tanks ['bufA', 'bufB']"
+      ],
+      "engaged": [
+        "DP COP refinement on tank 'bufA': COP inconsistency 2.00 > 0.50 - re-optimised to peak 38 C, gas 0.0 kWh",
+        "DP COP refinement on tank 'bufB': COP inconsistency 1.78 > 0.50 - re-optimised to peak 40 C, gas 0.0 kWh"
+      ],
+      "skipped": [],
+      "capped": [],
+      "failed": [],
+      "raw": [
+        "DP COP solver (mode=auto): eligible heating-curve heat-pump tanks ['bufA', 'bufB']",
+        "DP COP refinement on tank 'bufA': COP inconsistency 2.00 > 0.50 - re-optimised to peak 38 C, gas 0.0 kWh",
+        "DP COP refinement on tank 'bufB': COP inconsistency 1.78 > 0.50 - re-optimised to peak 40 C, gas 0.0 kWh"
+      ]
+    },
+    "solve_seconds": 0.0
+  },
+  "static": {
+    "ok": true,
+    "cop_solver": "static",
+    "optim_status": "Optimal",
+    "feasible": true,
+    "tanks": {
+      "bufA": {
+        "start": 38.0,
+        "min": 35.0,
+        "max": 47.61,
+        "peak": 47.61,
+        "total_variation": 28.2,
+        "start_mismatch_c": 0.0
+      },
+      "bufB": {
+        "start": 40.0,
+        "min": 36.0,
+        "max": 48.61,
+        "peak": 48.61,
+        "total_variation": 29.2,
+        "start_mismatch_c": 0.0
+      }
+    },
+    "band_violation_c": {
+      "bufA": 0.0,
+      "bufB": 0.0
+    },
+    "max_band_violation_c": 0.0,
+    "match_warnings": [],
+    "grid_peak_import_w": 899.0,
+    "pv_export_kwh": 17.94,
+    "deferrable_kwh": {
+      "P_deferrable0": 0.87,
+      "P_deferrable1": 0.83
+    },
+    "cost_proxy_eur": -0.3471,
+    "dp_events": {
+      "eligible": [],
+      "engaged": [],
+      "skipped": [],
+      "capped": [],
+      "failed": [],
+      "raw": []
+    },
+    "solve_seconds": 0.0
+  },
+  "delta": {
+    "cost_proxy_delta_eur": -0.0139,
+    "grid_peak_delta_w": 0.0,
+    "dp_engaged_tanks": 2,
+    "dp_capped_tanks": 0,
+    "auto_max_band_violation_c": 0.0,
+    "static_max_band_violation_c": 0.0
+  },
+  "fair_delta": {
+    "basis": "both under TRUE COP (static schedule re-costed; auto already true)",
+    "recosted_hp_tanks": [
+      "bufA",
+      "bufB"
+    ],
+    "static_true": {
+      "peak_w": 899.0,
+      "energy_eur": -0.3691,
+      "capacity_eur": 0.0,
+      "total_eur": -0.3691
+    },
+    "auto_true": {
+      "peak_w": 899.0,
+      "energy_eur": -0.361,
+      "capacity_eur": 0.0,
+      "total_eur": -0.361
+    },
+    "cost_delta_eur": 0.0081,
+    "peak_delta_w": 0.0,
+    "dp_helps_cost": false
+  }
+}

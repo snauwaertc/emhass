@@ -1,0 +1,14 @@
+2026-06-17 17:17:35,113 - __main__ - INFO - config.json does not exist, or has not been passed. config parameters may default to config_defaults.json
+2026-06-17 17:17:35,114 - __main__ - INFO - you may like to generate the config.json file on the configuration page
+2026-06-17 17:17:35,115 - __main__ - WARNING - Some secret parameters values are still matching their defaults
+2026-06-17 17:17:35,143 - __main__ - INFO - heat_topology compiled: 2 sources, 3 storage, 4 flows, 1 groups
+2026-06-17 17:17:35,147 - __main__ - INFO - Building CVXPY problem structure...
+2026-06-17 17:17:35,342 - __main__ - INFO - DP COP solver (mode=auto): eligible heating-curve heat-pump tanks ['buffer']
+2026-06-17 17:17:36,684 - __main__ - INFO - DP COP refinement on tank 'buffer': COP inconsistency 1.79 > 0.50 - re-optimised to peak 60 C, gas 0.0 kWh
+2026-06-17 17:17:36,766 - __main__ - INFO - Total value of the Cost function = -1894.34
+2026-06-17 17:17:36,770 - __main__ - INFO - config.json does not exist, or has not been passed. config parameters may default to config_defaults.json
+2026-06-17 17:17:36,770 - __main__ - INFO - you may like to generate the config.json file on the configuration page
+2026-06-17 17:17:36,771 - __main__ - WARNING - Some secret parameters values are still matching their defaults
+2026-06-17 17:17:36,772 - __main__ - INFO - heat_topology compiled: 2 sources, 3 storage, 4 flows, 1 groups
+2026-06-17 17:17:36,774 - __main__ - INFO - Building CVXPY problem structure...
+2026-06-17 17:17:36,859 - __main__ - INFO - Total value of the Cost function = -1899.05

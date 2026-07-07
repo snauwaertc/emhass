@@ -1,0 +1,114 @@
+{
+  "name": "infeasible_demand",
+  "hypothesis": "No banking headroom; the tank is forced to descend through its band. DP must engage or skip-cap, never violate the band.",
+  "limit_probed": "drain-dominated tank (heavy draw, undersized HP, no backup)",
+  "pass_criteria": "auto feasible AND zero band violation AND (engaged OR capped, not a silent miss).",
+  "auto": {
+    "ok": true,
+    "cop_solver": "auto",
+    "optim_status": "Optimal",
+    "feasible": true,
+    "tanks": {
+      "dhw": {
+        "start": 60.0,
+        "min": 50.0,
+        "max": 60.0,
+        "peak": 60.0,
+        "total_variation": 60.3,
+        "start_mismatch_c": 0.0
+      }
+    },
+    "band_violation_c": {
+      "dhw": 0.0
+    },
+    "max_band_violation_c": 0.0,
+    "match_warnings": [],
+    "grid_peak_import_w": 2120.0,
+    "pv_export_kwh": 10.94,
+    "deferrable_kwh": {
+      "P_deferrable0": 26.15
+    },
+    "cost_proxy_eur": 1.2237,
+    "dp_events": {
+      "eligible": [
+        "DP COP solver (mode=auto): eligible heating-curve heat-pump tanks ['dhw']"
+      ],
+      "engaged": [
+        "DP COP refinement on tank 'dhw': COP inconsistency 0.96 > 0.50 - re-optimised to peak 60 C, gas 0.0 kWh"
+      ],
+      "skipped": [],
+      "capped": [],
+      "failed": [],
+      "raw": [
+        "DP COP solver (mode=auto): eligible heating-curve heat-pump tanks ['dhw']",
+        "DP COP refinement on tank 'dhw': COP inconsistency 0.96 > 0.50 - re-optimised to peak 60 C, gas 0.0 kWh"
+      ]
+    },
+    "solve_seconds": 0.0
+  },
+  "static": {
+    "ok": true,
+    "cop_solver": "static",
+    "optim_status": "Optimal",
+    "feasible": true,
+    "tanks": {
+      "dhw": {
+        "start": 60.0,
+        "min": 50.0,
+        "max": 60.0,
+        "peak": 60.0,
+        "total_variation": 50.1,
+        "start_mismatch_c": 0.0
+      }
+    },
+    "band_violation_c": {
+      "dhw": 0.0
+    },
+    "max_band_violation_c": 0.0,
+    "match_warnings": [],
+    "grid_peak_import_w": 1932.0,
+    "pv_export_kwh": 10.66,
+    "deferrable_kwh": {
+      "P_deferrable0": 23.17
+    },
+    "cost_proxy_eur": 1.0097,
+    "dp_events": {
+      "eligible": [],
+      "engaged": [],
+      "skipped": [],
+      "capped": [],
+      "failed": [],
+      "raw": []
+    },
+    "solve_seconds": 0.0
+  },
+  "delta": {
+    "cost_proxy_delta_eur": 0.214,
+    "grid_peak_delta_w": 188.0,
+    "dp_engaged_tanks": 1,
+    "dp_capped_tanks": 0,
+    "auto_max_band_violation_c": 0.0,
+    "static_max_band_violation_c": 0.0
+  },
+  "fair_delta": {
+    "basis": "both under TRUE COP (static schedule re-costed; auto already true)",
+    "recosted_hp_tanks": [
+      "dhw"
+    ],
+    "static_true": {
+      "peak_w": 2393.0,
+      "energy_eur": 1.5159,
+      "capacity_eur": 0.0,
+      "total_eur": 1.5159
+    },
+    "auto_true": {
+      "peak_w": 2120.0,
+      "energy_eur": 1.2237,
+      "capacity_eur": 0.0,
+      "total_eur": 1.2237
+    },
+    "cost_delta_eur": -0.2922,
+    "peak_delta_w": -273.0,
+    "dp_helps_cost": true
+  }
+}

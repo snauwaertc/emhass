@@ -3263,7 +3263,7 @@ class Optimization:
             # coupled store above is excluded). At refinement time their draw on this tank
             # is replaced by their own comfort need (the loss to hold their target), not
             # the realised transfer - which scales with this tank's banked temperature and
-            # would poison the DP's demand. See docs/dp_cop_demand_decoupling.md.
+            # would poison the DP's demand (the demand-decoupling fix).
             coupled_to = coupled["to"] if coupled is not None else None
             non_coupled_receivers = []
             for tr in self._get_tank_transfers() if transfer_vars else []:
@@ -3437,7 +3437,7 @@ class Optimization:
                 # `ext` was inflated by the first solve banking this tank hot. Swap it for
                 # the receiver's own comfort need (loss to hold its target), which does NOT
                 # depend on this tank's temperature - so the DP is not poisoned by the very
-                # over-banking it exists to correct. See docs/dp_cop_demand_decoupling.md.
+                # over-banking it exists to correct (the demand-decoupling fix).
                 outdoor_full = np.asarray(e["outdoor"], dtype=float)[:n]
                 for rcv in e.get("non_coupled_receivers", []):
                     if rcv.get("q_var") is None:
