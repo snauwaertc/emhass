@@ -1919,6 +1919,33 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["optim_conf"]["def_minimum_on_time"], [3, 0, 0])
         self.assertEqual(params["optim_conf"]["def_minimum_off_time"], [2, 0, 0])
 
+    async def test_cop_hx_approach_wired_through_config(self):
+        """cop_hx_approach must follow the four-step add-parameter workflow like
+        its cop_solver siblings: present in the canonical defaults + schema, and
+        a user-configured value must reach optim_conf (it was previously read
+        only via an inline .get() default, unreachable from any config file)."""
+        import csv as csv_mod
+
+        import orjson as _orjson
+
+        defaults = _orjson.loads(open(emhass_conf["defaults_path"], "rb").read())
+        self.assertIn("cop_hx_approach", defaults)
+        self.assertEqual(defaults["cop_hx_approach"], 5.0)
+        definitions = _orjson.loads(
+            open(
+                emhass_conf["root_path"] / "static" / "data" / "param_definitions.json", "rb"
+            ).read()
+        )
+        self.assertIn("cop_hx_approach", definitions["System"])
+        with open(emhass_conf["associations_path"]) as f:
+            assoc_params = [row[2] for row in csv_mod.reader(f) if len(row) > 2]
+        self.assertIn("cop_hx_approach", assoc_params)
+        # A configured value flows into optim_conf
+        config = await utils.build_config(emhass_conf, logger, emhass_conf["defaults_path"])
+        config["cop_hx_approach"] = 3.5
+        params = await utils.build_params(emhass_conf, {}, config, logger)
+        self.assertEqual(params["optim_conf"]["cop_hx_approach"], 3.5)
+
     def test_check_def_loads(self):
         """Test padding of deferrable load parameter lists."""
         default_val = 5

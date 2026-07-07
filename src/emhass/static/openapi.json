@@ -555,6 +555,13 @@
             "x-unit": "COP",
             "description": "The DP COP refinement engages when the COP used differs from COP(achieved tank temperature) by more than this many COP units. Defaults to 0.5. (unit: COP)"
           },
+          "cop_hx_approach": {
+            "type": "number",
+            "default": 5.0,
+            "title": "COP heat-exchanger approach",
+            "x-unit": "degC",
+            "description": "Temperature difference (degC) between a thermal store and the heat pump's working fluid used when evaluating the temperature-dependent COP: the condenser runs at store temperature plus this approach (heating), the evaporator at store temperature minus it (cooling). Used by the COP consistency check and the DP refinement. Defaults to 5. (unit: degC)"
+          },
           "load_cost_forecast_method": {
             "type": "string",
             "enum": [

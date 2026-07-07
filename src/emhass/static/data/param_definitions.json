@@ -347,6 +347,13 @@
       "input": "float",
       "default_value": 0.5,
       "unit": "COP"
+    },
+    "cop_hx_approach": {
+      "friendly_name": "COP heat-exchanger approach",
+      "Description": "Temperature difference (degC) between a thermal store and the heat pump's working fluid used when evaluating the temperature-dependent COP: the condenser runs at store temperature plus this approach (heating), the evaporator at store temperature minus it (cooling). Used by the COP consistency check and the DP refinement. Defaults to 5.",
+      "input": "float",
+      "default_value": 5.0,
+      "unit": "degC"
     }
   },
   "Tariff": {
