@@ -243,16 +243,16 @@ def test_dp_respects_max_thermal_power():
     physically move. Uncapped, a mild-weather COP lets the DP concentrate its
     charging into one cheap slot far beyond the unit's rating; capped, every
     step's delivered heat stays at or below the cap and charging spreads."""
-    base = dict(
-        heat_capacity=1.0,
-        loss_coeff=0.0,
-        min_temp=20.0,
-        max_temp=60.0,
-        hp_max_power=5.7,       # kW electric
-        carnot_efficiency=0.5,
-        hx_approach=5.0,        # mild outdoor + low targets -> COP ~5-8
-        backup_max_power=0.0,
-    )
+    base = {
+        "heat_capacity": 1.0,
+        "loss_coeff": 0.0,
+        "min_temp": 20.0,
+        "max_temp": 60.0,
+        "hp_max_power": 5.7,  # kW electric
+        "carnot_efficiency": 0.5,
+        "hx_approach": 5.0,  # mild outdoor + low targets -> COP ~5-8
+        "backup_max_power": 0.0,
+    }
     n = 8
     price = np.full(n, 0.50)
     price[2] = 0.01  # one strictly cheapest slot invites a concentrated burst
@@ -267,11 +267,14 @@ def test_dp_respects_max_thermal_power():
         return qin / 0.5  # kW thermal
 
     uncapped = solve_thermal_dp(
-        price, outdoor_temperature=15.0,
-        params=ThermalDPParams(demand_kw=demand, **base), tank_start=25.0,
+        price,
+        outdoor_temperature=15.0,
+        params=ThermalDPParams(demand_kw=demand, **base),
+        tank_start=25.0,
     )
     capped = solve_thermal_dp(
-        price, outdoor_temperature=15.0,
+        price,
+        outdoor_temperature=15.0,
         params=ThermalDPParams(demand_kw=demand, max_thermal_power=6.0, **base),
         tank_start=25.0,
     )
