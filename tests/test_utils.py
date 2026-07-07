@@ -4083,9 +4083,7 @@ class TestCompileHeatTopology(unittest.TestCase):
             "flows": [{"from": "hp", "to": "dhw"}, {"from": "booster", "to": "dhw"}],
         }
         out = utils.compile_heat_topology(topo)
-        self.assertEqual(
-            out["def_load_config"][0]["thermal_source"]["max_thermal_power"], 4000.0
-        )
+        self.assertEqual(out["def_load_config"][0]["thermal_source"]["max_thermal_power"], 4000.0)
         # Booster (load 1) has no cap -> key absent
         self.assertNotIn("max_thermal_power", out["def_load_config"][1]["thermal_source"])
 
