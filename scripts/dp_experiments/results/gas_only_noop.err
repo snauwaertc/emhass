@@ -1,0 +1,12 @@
+2026-06-17 17:17:35,028 - __main__ - INFO - config.json does not exist, or has not been passed. config parameters may default to config_defaults.json
+2026-06-17 17:17:35,028 - __main__ - INFO - you may like to generate the config.json file on the configuration page
+2026-06-17 17:17:35,029 - __main__ - WARNING - Some secret parameters values are still matching their defaults
+2026-06-17 17:17:35,067 - __main__ - INFO - heat_topology compiled: 1 sources, 1 storage, 1 flows, 0 groups
+2026-06-17 17:17:35,070 - __main__ - INFO - Building CVXPY problem structure...
+2026-06-17 17:17:35,169 - __main__ - INFO - Total value of the Cost function = -3.67
+2026-06-17 17:17:35,216 - __main__ - INFO - config.json does not exist, or has not been passed. config parameters may default to config_defaults.json
+2026-06-17 17:17:35,216 - __main__ - INFO - you may like to generate the config.json file on the configuration page
+2026-06-17 17:17:35,219 - __main__ - WARNING - Some secret parameters values are still matching their defaults
+2026-06-17 17:17:35,221 - __main__ - INFO - heat_topology compiled: 1 sources, 1 storage, 1 flows, 0 groups
+2026-06-17 17:17:35,224 - __main__ - INFO - Building CVXPY problem structure...
+2026-06-17 17:17:35,287 - __main__ - INFO - Total value of the Cost function = -3.67
