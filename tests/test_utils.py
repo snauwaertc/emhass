@@ -3683,7 +3683,12 @@ class TestResolveThermalBatteryCopHeatingCurve(unittest.TestCase):
                     "type": "heatpump",
                     "carnot_efficiency": 0.35,
                     "nominal_power": 2100,
-                    "cooling_curve": {"slope": 0.3, "offset": 20, "min_supply": 8, "max_supply": 18},
+                    "cooling_curve": {
+                        "slope": 0.3,
+                        "offset": 20,
+                        "min_supply": 8,
+                        "max_supply": 18,
+                    },
                 }
             ],
             "storage": [
@@ -3751,23 +3756,34 @@ class TestCompileHeatTopology(unittest.TestCase):
         tank above it. Setting max_supply_temperature silences the warning (the cap is
         left opt-in because auto-capping at the supply temperature makes a tank whose
         min_temperature sits at that temperature infeasible)."""
+
         def topo(with_cap):
             src = {
-                "id": "hp", "type": "heatpump", "supply_temperature": 45,
-                "carnot_efficiency": 0.4, "nominal_power": 3000, "cost_track": "e",
+                "id": "hp",
+                "type": "heatpump",
+                "supply_temperature": 45,
+                "carnot_efficiency": 0.4,
+                "nominal_power": 3000,
+                "cost_track": "e",
             }
             if with_cap:
                 src["max_supply_temperature"] = 45
             return {
                 "sources": [src],
-                "storage": [{
-                    "id": "buf", "volume": 0.1, "start_temperature": 38,
-                    "min_temperature": [30] * 48, "max_temperature": [60] * 48,
-                    "thermal_loss": 0.08,
-                }],
+                "storage": [
+                    {
+                        "id": "buf",
+                        "volume": 0.1,
+                        "start_temperature": 38,
+                        "min_temperature": [30] * 48,
+                        "max_temperature": [60] * 48,
+                        "thermal_loss": 0.08,
+                    }
+                ],
                 "flows": [{"from": "hp", "to": "buf"}],
                 "cost_tracks": {"e": [0.2] * 48},
             }
+
         logger = logging.getLogger("emhass.utils")
         with self.assertLogs(logger, level="WARNING") as cm:
             utils.compile_heat_topology(topo(with_cap=False))
