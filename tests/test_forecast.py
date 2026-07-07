@@ -7,6 +7,8 @@ import os
 import pathlib
 import pickle
 import re
+import shutil
+import tempfile
 import unittest
 import unittest.mock
 
@@ -58,6 +60,14 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
         return params
 
     async def asyncSetUp(self):
+        # Isolate the solcast daily rate-limit counter per test: it otherwise
+        # lives in the machine-global tempdir keyed by date, so earlier runs
+        # (or anything else on the machine) exhaust the daily budget and flake
+        # the solcast mock tests.
+        self._solcast_counter_dir = tempfile.mkdtemp(prefix="emhass_test_solcast_")
+        os.environ["EMHASS_SOLCAST_COUNTER_DIR"] = self._solcast_counter_dir
+        self.addCleanup(os.environ.pop, "EMHASS_SOLCAST_COUNTER_DIR", None)
+        self.addCleanup(shutil.rmtree, self._solcast_counter_dir, ignore_errors=True)
         self.get_data_from_file = True
         params = await TestForecast.get_test_params()
         params_json = orjson.dumps(params).decode("utf-8")
