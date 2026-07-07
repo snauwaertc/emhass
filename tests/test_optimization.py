@@ -5554,6 +5554,93 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIn(opt.optim_status, ("Optimal", "Optimal (Relaxed)", "Optimal (Incumbent)"))
         self.assertGreater(res["P_deferrable0"].sum(), 0, "cooling source never ran")
 
+    def test_cooling_summer_day_scenario(self):
+        """Validation scenario: a realistic summer day end to end. Sinusoidal
+        outdoor 20->34 C, a dynamic price with a cheap solar midday and an
+        expensive evening peak, a chilled zone with a comfort band and heat
+        leaking in from outside. The plan must (a) solve, (b) actually run the
+        chiller against the heat ingress, (c) hold the zone inside its band,
+        and (d) buy its cooling below the time-average price (banking cold in
+        the cheap solar hours instead of fighting the evening peak)."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        # Treat slot 0 as midnight: outdoor peaks 34 C at 14:00 (slot 28), the
+        # cheap solar window covers 10:00-16:00 (slots 20-32, deliberately
+        # overlapping the heat peak - PV-rich midday IS the hot part of a real
+        # summer day) and the evening price peak runs 18:00-22:00 (slots 36-44).
+        hours = np.arange(48) * 0.5
+        outdoor = 27.0 + 7.0 * np.cos((hours - 14.0) / 24.0 * 2 * np.pi)  # 20..34 C
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = outdoor.tolist()
+        self.optim_conf["number_of_deferrable_loads"] = 1
+        self.optim_conf["nominal_power_of_deferrable_loads"] = [2500]
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [0]
+        self.optim_conf["operating_hours_of_each_deferrable_load"] = [0]
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False]
+        self.optim_conf["set_deferrable_load_single_constant"] = [False]
+        self.optim_conf["set_deferrable_startup_penalty"] = [0.0]
+        self.optim_conf["set_deferrable_max_startups"] = [0]
+        self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0]
+        self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0]
+        self.optim_conf["cop_solver"] = "auto"
+        self.optim_conf["def_load_config"] = [
+            {
+                "thermal_source": {
+                    "cooling_curve": {
+                        "slope": 0.3,
+                        "offset": 20,
+                        "min_supply": 8,
+                        "max_supply": 18,
+                    },
+                    "carnot_efficiency": 0.35,
+                    "sense": "cool",
+                }
+            },
+        ]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "zone",
+                "load_ids": [0],
+                "volume": 0.4,
+                "density": 1000,
+                "heat_capacity": 4.186,
+                "start_temperature": 24.0,
+                # Heat leaks IN from the hot outdoors (negative signed loss for
+                # a chilled store) - the chiller must genuinely work all day.
+                "thermal_loss": 0.25,
+                "sense": "cool",
+                "min_temperatures": [16.0] * 48,
+                "max_temperatures": [26.0] * 48,
+                "desired_temperatures": [23.0] * 48,
+                "penalty_factor": 20,
+            }
+        ]
+        opt = self.create_optimization()
+        # Cheap solar midday (10:00-16:00), dear evening peak (18:00-22:00).
+        ulc = np.full(48, 0.30)
+        ulc[20:32] = 0.08
+        ulc[36:44] = 0.45
+        upp = self.df_input_data_dayahead[opt.var_prod_price].values
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            ulc,
+            upp,
+        )
+        self.assertIn(opt.optim_status, ("Optimal", "Optimal (Relaxed)", "Optimal (Incumbent)"))
+        chiller = res["P_deferrable0"].reset_index(drop=True).to_numpy()
+        self.assertGreater(chiller.sum() * 0.5 / 1000, 0.5, "chiller barely ran on a hot day")
+        temp_col = next(c for c in res.columns if "predicted_temp" in c)
+        temps = res[temp_col].to_numpy()
+        self.assertLessEqual(temps.max(), 26.0 + 1e-3, "zone exceeded its comfort ceiling")
+        self.assertGreaterEqual(temps.min(), 16.0 - 1e-3, "zone under-cooled below its floor")
+        # Arbitrage: the energy-weighted price of cooling beats the time average.
+        weighted = float((chiller * ulc).sum() / max(chiller.sum(), 1e-9))
+        self.assertLess(
+            weighted,
+            float(ulc.mean()),
+            "cooling energy was not shifted toward the cheap solar hours",
+        )
+
     def test_shared_thermal_tank_offset_load_ids(self):
         """A shared tank whose members are NOT loads 0..M-1 must work: this is
         exactly what heat_topology's extend_deferrable_loads produces (user
