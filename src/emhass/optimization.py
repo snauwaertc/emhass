@@ -3180,7 +3180,7 @@ class Optimization:
         # exception - a cool tank with a COUPLED store - is skipped at registration
         # below (thermal_dp does not support that combination yet).
         _dp_active = (
-            dp_hp_info is not None and self.optim_conf.get("cop_solver", "auto") != "static"
+            dp_hp_info is not None and self.optim_conf.get("cop_solver", "static") != "static"
         )
         if _dp_active:
             if not hasattr(self, "_dp_tank_entries"):
@@ -3366,7 +3366,7 @@ class Optimization:
         super-heating past it), and re-solve once. The DP is exact in a single pass.
         """
         entries = getattr(self, "_dp_tank_entries", [])
-        mode = self.optim_conf.get("cop_solver", "auto")
+        mode = self.optim_conf.get("cop_solver", "static")
         if not entries or mode == "static" or self.prob is None or self.prob.value is None:
             return
         from emhass.thermal_dp import ThermalDPParams, solve_thermal_dp

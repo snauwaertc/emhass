@@ -544,9 +544,9 @@
               "dp",
               "static"
             ],
-            "default": "auto",
+            "default": "static",
             "title": "Heat-pump COP solver",
-            "description": "How the temperature-dependent heat-pump COP is resolved for shared thermal tanks. 'auto' (default) runs an exact dynamic-programming refinement only when the static solve's COP is inconsistent with the achieved tank temperature; 'dp' always runs it; 'static' disables it (constant heating-curve COP)."
+            "description": "How the temperature-dependent heat-pump COP is resolved for shared thermal tanks. 'static' (default) keeps the constant heating-curve COP - the pre-existing behavior. 'auto' runs an exact dynamic-programming refinement when the static solve's COP is inconsistent with the achieved tank temperature; 'dp' always runs it. Opt in with 'auto' for tanks whose heat pump banks heat well above its curve supply."
           },
           "cop_solver_tolerance": {
             "type": "number",
