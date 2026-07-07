@@ -600,9 +600,7 @@ def compile_heat_topology(topology: dict) -> dict:
     for kind, entries in (("sources", sources), ("storage", storage)):
         for i, entry in enumerate(entries):
             if not isinstance(entry, dict) or not entry.get("id"):
-                raise ValueError(
-                    f"heat_topology.{kind}[{i}] is missing the required 'id' field"
-                )
+                raise ValueError(f"heat_topology.{kind}[{i}] is missing the required 'id' field")
 
     src_by_id = {s["id"]: s for s in sources}
     src_index_by_id = {s["id"]: i for i, s in enumerate(sources)}
@@ -670,15 +668,13 @@ def compile_heat_topology(topology: dict) -> dict:
         penalty = float(src.get("startup_penalty", 0.0))
         if penalty < 0:
             raise ValueError(
-                f"heat_topology.sources[{src['id']}].startup_penalty must be >= 0, "
-                f"got {penalty}"
+                f"heat_topology.sources[{src['id']}].startup_penalty must be >= 0, got {penalty}"
             )
         startup_penalty.append(penalty)
         starts_cap = int(src.get("max_startups", 0))
         if starts_cap < 0:
             raise ValueError(
-                f"heat_topology.sources[{src['id']}].max_startups must be >= 0, "
-                f"got {starts_cap}"
+                f"heat_topology.sources[{src['id']}].max_startups must be >= 0, got {starts_cap}"
             )
         max_startups.append(starts_cap)
         # Source-side fields - shape expected by resolve_thermal_battery_cop

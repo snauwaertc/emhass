@@ -3179,7 +3179,9 @@ class Optimization:
         # so dp_hp_info stays None) and keeps its exact static COP. The one cooling
         # exception - a cool tank with a COUPLED store - is skipped at registration
         # below (thermal_dp does not support that combination yet).
-        _dp_active = dp_hp_info is not None and self.optim_conf.get("cop_solver", "auto") != "static"
+        _dp_active = (
+            dp_hp_info is not None and self.optim_conf.get("cop_solver", "auto") != "static"
+        )
         if _dp_active:
             if not hasattr(self, "_dp_tank_entries"):
                 self._dp_tank_entries = []
@@ -3588,7 +3590,9 @@ class Optimization:
         try:
             # Half the time budget: the main solve may already have spent the full
             # limit, and the warm-started re-solve only adds bound constraints.
-            prob2.solve(solver=selected_solver, warm_start=True, **self._dp_resolve_opts(solver_opts))
+            prob2.solve(
+                solver=selected_solver, warm_start=True, **self._dp_resolve_opts(solver_opts)
+            )
             # Accept with EXACTLY the main path's policy (shared predicate): a
             # user_limit incumbent is healthy - the main return path publishes it
             # as "Optimal (Incumbent)" - while infeasible/unbounded/None-value

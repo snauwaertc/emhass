@@ -3866,7 +3866,12 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.optim_conf["def_load_config"] = [
             {
                 "thermal_source": {
-                    "heating_curve": {"slope": 0.7, "offset": 30, "min_supply": 25, "max_supply": 45},
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 30,
+                        "min_supply": 25,
+                        "max_supply": 45,
+                    },
                     "carnot_efficiency": 0.45,
                     "max_supply_temperature": 70,
                 }
@@ -3895,9 +3900,16 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             },
         ]
         self.optim_conf["tank_transfers"] = [
-            {"from": "buffer", "to": "house", "transfer_coefficient": 0.7, "max_transfer_power": 20000},
+            {
+                "from": "buffer",
+                "to": "house",
+                "transfer_coefficient": 0.7,
+                "max_transfer_power": 20000,
+            },
         ]
-        self.optim_conf["cop_solver"] = "static"  # this test is about the output column, keep it light
+        self.optim_conf["cop_solver"] = (
+            "static"  # this test is about the output column, keep it light
+        )
         opt = self.create_optimization()
         res = opt.perform_optimization(
             self.df_input_data_dayahead,
@@ -3921,10 +3933,10 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         unusable solves (infeasible/unbounded/None, or no incumbent) still retry."""
         needs = Optimization._needs_relaxed_retry
         self.assertFalse(needs("user_limit", 12.3))  # incumbent present -> accept it
-        self.assertTrue(needs("user_limit", None))    # hit the limit, no solution -> retry
+        self.assertTrue(needs("user_limit", None))  # hit the limit, no solution -> retry
         self.assertFalse(needs("optimal", 5.0))
         self.assertTrue(needs("infeasible", None))
-        self.assertTrue(needs("infeasible", 5.0))     # infeasible always retries
+        self.assertTrue(needs("infeasible", 5.0))  # infeasible always retries
         self.assertTrue(needs("unbounded", None))
         self.assertTrue(needs(None, None))
 
