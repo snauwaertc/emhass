@@ -74,10 +74,12 @@ def _record_optim_snapshot(
         # /api/v1/last-run for that run. Only the timestamp is shared, not the
         # verdict: a failed/infeasible run is still recorded by last_run (status
         # error/infeasible) but must not surface on /api/v1/plan as status "ok" —
-        # the plan endpoint keeps serving the last VALID plan (or no-run). Gating on
-        # optim_status == "Optimal" mirrors last_run's own "ok" criterion, so the
-        # two endpoints stay consistent (plan published iff last-run is "ok").
-        if optim_status == "Optimal":
+        # the plan endpoint keeps serving the last VALID plan (or no-run). The gate
+        # uses the SAME startswith("Optimal") criterion as last_run's "ok"
+        # classifier - which also accepts the published "Optimal (Relaxed)" /
+        # "Optimal (Incumbent)" variants - so the two endpoints stay consistent
+        # (plan published iff last-run is "ok").
+        if optim_status and str(optim_status).startswith("Optimal"):
             plan_store.record(
                 input_data_dict["emhass_conf"]["data_path"],
                 plan=plan_store.serialize(opt_res),
