@@ -564,9 +564,13 @@ class Forecast:
         fails first -- intentionally conservative to avoid a partial
         aggregate. Keyed by UTC date, since Solcast's quota is UTC-day based.
         Returns True (and reserves) if it fits under max_calls, else False.
+        The directory can be overridden with the ``EMHASS_SOLCAST_COUNTER_DIR``
+        environment variable: the counter is otherwise machine-global, so parallel
+        installs (or test runs) sharing one tempdir would consume each other's
+        daily budget.
         """
         today = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
-        temp_dir = tempfile.gettempdir()
+        temp_dir = os.environ.get("EMHASS_SOLCAST_COUNTER_DIR") or tempfile.gettempdir()
         counter_path = os.path.join(temp_dir, f"emhass_solcast_calls_{today}.count")
 
         try:
