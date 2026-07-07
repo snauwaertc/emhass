@@ -14920,6 +14920,103 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
         return opt, res
 
+    def test_repro_max_thermal_power_hp_not_abandoned(self):
+        """Regression (max_thermal_power x semi-continuous load): EMHASS's
+        semi-continuous convention is the strict equality p == nominal * bin -
+        ON means EXACTLY nominal power. A binding max_thermal_power forces
+        p <= cap/COP < nominal at high-COP steps, which made OFF the only
+        feasible state: the solver returned an 'Optimal' plan that abandoned a
+        cheap high-COP heat pump entirely (objective ~50x worse than the
+        feasible heating plan) rather than throttle it.
+
+        The fix keeps the on/off convention but caps the ON level itself:
+        p == bin * min(nominal, cap/COP) per step - a real heat pump at its
+        thermal ceiling runs flat-out against whichever limit binds. The
+        capped semi-continuous HP must therefore RUN (not be abandoned) and
+        its delivered heat must respect the cap at every step."""
+        _, res0 = self._run_hp_curve_soft_comfort(max_thermal_power=None)
+        _, res1 = self._run_hp_curve_soft_comfort(max_thermal_power=15000)
+        self.assertGreater(
+            res0["P_deferrable0"].sum(), 0, "control: uncapped HP heats toward the soft target"
+        )
+        self.assertGreater(
+            res1["P_deferrable0"].sum(), 0, "capped HP abandoned despite cheap COP-8 slots"
+        )
+        # Delivered heat respects the cap at every step (COP 8 at 20 C outdoor
+        # with the 28 C curve supply; 15 kW cap -> at most 1875 W electrical ON).
+        cop = np.asarray(
+            utils.resolve_thermal_battery_cop(
+                {
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 38,
+                        "min_supply": 28,
+                        "max_supply": 70,
+                    },
+                    "carnot_efficiency": 0.46,
+                },
+                [20.0] * 48,
+                length=48,
+            )
+        )
+        thermal = cop * res1["P_deferrable0"].reset_index(drop=True).to_numpy()
+        self.assertLessEqual(
+            thermal.max(),
+            15000.0 + 1e-3,
+            "ON-state delivered heat must respect max_thermal_power",
+        )
+
+    def _run_hp_curve_soft_comfort(self, max_thermal_power):
+        """A heating_curve HP (Parameter COP) feeding a tank with a SOFT comfort
+        target (desired_temperature). Warm 20 C outdoor -> curve supply 28 C ->
+        COP clamps to 8, so the cap (if set) binds. Cheap flat price. The HP
+        should heat toward the target whether or not the cap binds; abandoning it
+        to the soft penalty when cheap COP-8 slots exist is the bug."""
+        from emhass import utils
+
+        hp = {
+            "id": "hp",
+            "type": "heatpump",
+            "heating_curve": {"slope": 0.7, "offset": 38, "min_supply": 28, "max_supply": 70},
+            "carnot_efficiency": 0.46,
+            "nominal_power": 5700,
+        }
+        if max_thermal_power is not None:
+            hp["max_thermal_power"] = max_thermal_power
+        topo = {
+            "sources": [hp],
+            "storage": [
+                {
+                    "id": "tank",
+                    "volume": 1.0,
+                    "start_temperature": 30.0,
+                    "thermal_loss": 0.0,
+                    "min_temperature": [20.0] * 48,
+                    "max_temperature": [65.0] * 48,
+                    "desired_temperature": 50,
+                    "penalty_factor": 50,
+                }
+            ],
+            "flows": [{"from": "hp", "to": "tank"}],
+        }
+        compiled = utils.compile_heat_topology(topo)
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [20.0] * 48
+        for key, val in compiled.items():
+            self.optim_conf[key] = val
+        self.optim_conf["cop_solver"] = "static"
+        opt = self.create_optimization()
+        ulc = np.full(48, 0.10)
+        upp = self.df_input_data_dayahead[opt.var_prod_price].values
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            ulc,
+            upp,
+        )
+        return opt, res
+
 
 if __name__ == "__main__":
     unittest.main()
