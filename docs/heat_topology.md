@@ -178,6 +178,30 @@ omitting them keeps the existing water-tank behaviour unchanged.
 | `thermal_mass` | number | from `volume` | Heat capacity directly in **kWh/K**, instead of a water volume - the natural unit for a building. |
 | `loss_coefficient` | number | none | Heat-loss coefficient **UA** in **kW/K**. When set, the standing loss is *state-dependent* - `UA*(T - outdoor)` - so the zone loses more when warmer and the optimiser can pre-heat the mass on cheap power and coast through a price peak. Mutually exclusive with a `building_demand` consumer (both model loss to outdoor). |
 | `thermal_inertia` | number | `0` | Lag in **hours** between heat input and the temperature response (same field as the classic thermal model). |
+| `prior_heat` | list | none | Initial condition for `thermal_inertia`: thermal **kWh per step already delivered but not yet arrived**, oldest first. Only needed under rolling MPC - see below. |
+
+> **Rolling MPC with `thermal_inertia`: supply `prior_heat`.** The lag means heat produced
+> at step `t` only reaches the store at `t+1+L`. In a one-shot day-ahead solve the first `L`
+> steps therefore carry no source term, which is correct - nothing precedes the horizon. But
+> a rolling MPC re-solve starts *mid-flight*: heat committed by the previous runs is
+> physically still on its way. Without `prior_heat` the model's temperature over that window
+> is independent of any power it chooses, so the optimiser cannot see the effect of its own
+> past actions and keeps re-injecting - producing an `Optimal` plan that over-provisions
+> heating (reported with a 96-run repro on a real install, upstream #539).
+>
+> Supply it per run via the `shared_tank_prior_heat` runtime parameter (keyed by tank id,
+> the sibling of `shared_tank_start_temperatures`) rather than writing it into the topology -
+> it is per-run state, not configuration:
+>
+> ```json
+> {"shared_tank_prior_heat": {"house": [0.8, 1.4]}}
+> ```
+>
+> Values are the thermal kWh delivered in each of the last `L` steps, oldest first; a shorter
+> list is right-aligned (the most recent steps are the ones still in flight). Omitting it
+> keeps the previous cold-start behaviour exactly, so existing configs are unaffected.
+> The same applies to the classic per-load [`thermal_config`](thermal_model.md), whose
+> `prior_heat` is expressed in **input watts** per step - the unit that model already speaks.
 
 Combine with the comfort fields above (`min/max_temperatures`, `desired_temperatures`)
 for a relaxation window - e.g. a house held 19.5-21.5 degC, fed by a
