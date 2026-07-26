@@ -281,6 +281,12 @@ class OptimizationCache:
             # shared_thermal_tanks hash below: it is baked into the tank dynamics
             # as a raw array at build time, so changing it must force a rebuild.
             "draw_off_demand",
+            # NOT listed here on purpose: prior_heat. Although it is per-run state
+            # (like start_temperature), it is baked into the dead-zone constraint as
+            # a raw array at build time rather than parameterized, so it is
+            # STRUCTURAL - excluding it would let a cached problem silently reuse a
+            # stale initial condition. Move it here only together with making it a
+            # cp.Parameter refreshed before each solve.
         }
         # Plant parameters that are updated dynamically (no rebuild needed)
         plant_runtime_keys = {
