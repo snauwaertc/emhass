@@ -2948,6 +2948,7 @@ class TestOptimizationCache(unittest.TestCase):
         )
 
         self.assertNotEqual(key1, key2)
+
     def test_cache_key_rebuilds_on_shared_tank_draw_off_change(self):
         """A shared tank's draw_off_demand is baked into the LP as a raw numpy
         array at build time (unlike thermal_battery's, which is parameterized), so

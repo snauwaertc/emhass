@@ -3016,6 +3016,7 @@ class Optimization:
         unchanged. Accepts a scalar or a NumPy array.
         """
         return loss_kw * self.time_step
+
     @staticmethod
     def _resolve_prior_heat(raw, lag_steps, label):
         """Return the length-`lag_steps` initial condition for a lagged thermal model.
