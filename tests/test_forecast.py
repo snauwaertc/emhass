@@ -828,6 +828,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
         exercises the overlap resampling with a real payload shape instead of
         a fully zero-filled result.
         """
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         original_freq = self.fcst.freq
         original_forecast_dates = self.fcst.forecast_dates
         self.fcst.freq = pd.Timedelta("15min")
@@ -983,6 +984,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
     # conversion holds (UTC source → local grid), and per-window energy is
     # preserved when a window is split into sub-steps. No ramped value appears.
     async def test_solcast_overlap_fine_and_equal_grids(self):
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         windows = [(self._P1, "09:30"), (self._P2, "10:00"), (self._P3, "10:30")]
         for freq_min in (30, 15, 5):
             with self.subTest(freq=f"{freq_min}min"):
@@ -1004,6 +1006,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
     # their mean, and no source period is dropped. Trailing partial coverage
     # scales towards zero.
     async def test_solcast_overlap_coarse_grid_preserves_energy(self):
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         self._solcast_grid_setup("60min", start="09:30:00", end="11:30:00")
         df = await self._fetch_solcast("123456", self._three_period_payload())
         # [09:30,10:30) -> mean(200, 800) = 500
@@ -1019,6 +1022,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
     # is overlap-weighted between the two source averages, NOT step-held from
     # its own start timestamp.
     async def test_solcast_overlap_non_divisor_grid_is_overlap_weighted(self):
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         self._solcast_grid_setup("20min", start="09:30:00", end="10:30:00")
         df = await self._fetch_solcast("123456", self._three_period_payload())
         # [09:50,10:10): 10min in [09:30,10:00)=200 + 10min in [10:00,10:30)=800
@@ -1030,6 +1034,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
     # F: the forecast window starts INSIDE a source period; the leading
     # timesteps still take the period that actually contains them.
     async def test_solcast_overlap_partial_leading_source_interval(self):
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         self._solcast_grid_setup("5min", start="09:40:00", end="10:10:00")
         df = await self._fetch_solcast("123456", self._three_period_payload())
         for time_str, expected in (
@@ -1043,6 +1048,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
     # G: intervals outside genuine Solcast coverage are zero, both before the
     # first period start and after the last period end.
     async def test_solcast_overlap_outside_coverage_is_zero(self):
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         self._solcast_grid_setup("30min", start="09:00:00", end="11:30:00")
         df = await self._fetch_solcast("123456", self._three_period_payload())
         self.assertEqual(df.loc[self._win("09:00"), "yhat"], 0.0)  # before [09:30, …)
@@ -1052,6 +1058,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
     # H: an internal missing source period is NOT forward-filled from the
     # previous period — the uncovered target intervals are zero.
     async def test_solcast_overlap_internal_gap_not_held(self):
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         self._solcast_grid_setup("15min", start="09:30:00", end="11:00:00")
         df = await self._fetch_solcast("123456", self._three_period_payload(drop=(1,)))
         self.assertAlmostEqual(df.loc[self._win("09:45"), "yhat"], 200.0, places=6)
@@ -1061,6 +1068,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
 
     # I: multi-rooftop aggregation still sums per interval.
     async def test_solcast_overlap_multirooftop_sum(self):
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         self._solcast_grid_setup("15min")
         df = await self._fetch_solcast(
             "111111,222222",
@@ -1075,6 +1083,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
     # J: the P10/P50 blend is applied to the source average before mapping, so
     # quantile bias is unchanged by the resampling.
     async def test_solcast_overlap_preserves_quantile_bias(self):
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         self._solcast_grid_setup("15min")
         self.fcst.optim_conf["weather_forecast_pv_quantile_bias"] = 1.0  # pure P10
         self.addCleanup(
@@ -1087,6 +1096,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
     # L: over a window fully covered by Solcast, total energy on the
     # optimisation grid equals the source-period energy for every grid.
     async def test_solcast_overlap_source_energy_preserved(self):
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         source_energy = (self._P1 + self._P2 + self._P3) * 0.5  # Wh over [09:30, 11:00)
         for freq_str in ("15min", "45min", "90min"):
             with self.subTest(freq=freq_str):
@@ -2457,6 +2467,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
 
     async def test_solcast_caching_and_errors(self):
         """Test Solcast caching logic and API error handling."""
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         w_forecast_cache_path = emhass_conf["data_path"] / "weather_forecast_data.pkl"
         # Test Cache Hit
         data = pd.DataFrame(index=self.fcst.forecast_dates)
@@ -2751,6 +2762,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
         For rate-limited providers (Solcast) the v0.17.3 stale-cache fallback
         (reindex + zero-fill) must still be used to preserve daily API quota.
         """
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         w_forecast_cache_path = (
             emhass_conf["data_path"] / "weather_forecast_data_stale_solcast_test.pkl"
         )
@@ -3183,6 +3195,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
 
         Plus an edge case: an element with pv_estimate10 absent, bias=1.0 -> fallback to pv_estimate.
         """
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         # P50 = 5.0 kW, P10 = 2.0 kW, P90 = 7.0 kW (ratios make assertions easy to reason about)
         P50, P10, P90 = 5.0, 2.0, 7.0
         payload = self._build_solcast_bias_payload(P50, P10, P90, missing_p10_tail=True)
@@ -3273,6 +3286,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
         - out-of-range numerics (-1, 2) must clamp to [0, 1].
         Each case is checked by the resulting yhat ratio vs the pure-P50 baseline.
         """
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         P50, P10 = 5.0, 2.0
         payload = self._build_solcast_bias_payload(P50, P10)
         get_url = self._setup_solcast_bias_env()
@@ -3306,6 +3320,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
     # warn the user it is being ignored, rather than silently doing nothing.
     async def test_get_weather_forecast_pv_quantile_bias_warns_for_non_solcast(self):
         """Setting the bias for a non-solcast method must warn and not crash."""
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         self.fcst.optim_conf["weather_forecast_pv_quantile_bias"] = 0.5
         try:
             with self.assertLogs(logger, level="WARNING") as cm:
@@ -3320,6 +3335,7 @@ class TestForecast(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_weather_forecast_pv_quantile_bias_zero_no_warn_non_solcast(self):
         """The default bias of 0 must NOT warn under a non-solcast method."""
+        self._isolate_solcast_counter_dir()  # never touch the real daily quota counter
         self.fcst.optim_conf["weather_forecast_pv_quantile_bias"] = 0.0
         try:
             df = await self.fcst.get_weather_forecast(method="csv")
