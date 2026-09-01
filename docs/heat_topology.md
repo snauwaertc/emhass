@@ -16,6 +16,9 @@ tariff, with the constraint that one source can only serve one target at a time.
 single thermal store, the flat [thermal_battery](thermal_battery.md) configuration
 is simpler and is what you want. Reach for the graph model when you have more than
 one source, more than one store, or sources priced against different commodities.
+
+To disable it, use JSON `null` (the value), not the string `"null"` - a quoted
+`"null"` is a non-empty string and is not treated as disabled.
 ```
 
 ## The model
@@ -465,6 +468,18 @@ The compiler fails fast with a `ValueError` naming the offending field when:
 
 If `heat_topology` is set to something that is not a non-empty object, it is ignored
 and a warning is logged.
+
+### If the topology seems to be ignored
+
+Confirm that:
+
+1. the value is a JSON object, not a quoted JSON string;
+2. a disabled configuration uses JSON `null`, not `"null"`;
+3. all temperature, demand and cost arrays use the same timestep convention as the
+   optimization horizon; and
+4. the log contains the compile summary
+   (`heat_topology compiled: <sources> sources, <storage> storage, <flows> flows, <groups> groups`) -
+   if it does not, the graph never reached the compiler.
 
 ## See also
 
