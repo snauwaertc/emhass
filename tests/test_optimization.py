@@ -6056,6 +6056,62 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             seeded[1], base[1] + 1.0, "per-load dead zone must honour in-flight heat"
         )
 
+    def test_shared_tank_building_demand_honours_window_and_internal_gains(self):
+        """A building_demand shared tank (u_value / envelope_area / ventilation_rate /
+        heated_volume) must account for window solar gain and internal gains INSIDE
+        its demand model, exactly as the per-load thermal_config path does.
+
+        Before this fix the shared-tank physics call dropped every gain argument,
+        and the window-gain block below it is gated to zone (loss_coefficient)
+        tanks, so a building_demand tank fell through both: its demand came out as
+        the raw envelope loss - U*A*dT plus ventilation - no matter what
+        window_area / shgc / internal_gains_factor said. Reported on upstream #539
+        with 6.1 kWh/day of internal gains silently dropped against a 59.2 kWh/day
+        gross demand, inflating planned heating to 1.8-2.2x measured."""
+
+        def heating_energy(with_gains):
+            self.df_input_data_dayahead = self.prepare_forecast_data()
+            self.df_input_data_dayahead["outdoor_temperature_forecast"] = [5.0] * 48
+            ghi = np.zeros(48)
+            ghi[18:30] = 500.0  # strong midday sun
+            self.df_input_data_dayahead["ghi"] = ghi
+            self._setup_single_hp(supply_temperature=40.0)
+            tank = {
+                "id": "house",
+                "load_ids": [0],
+                "thermal_mass": 8.0,
+                "u_value": 0.3,
+                "envelope_area": 300.0,
+                "ventilation_rate": 0.4,
+                "heated_volume": 350.0,
+                "indoor_target_temperature": 20.0,
+                "start_temperature": 20.0,
+                "min_temperatures": [19.0] * 48,
+                "max_temperatures": [24.0] * 48,
+                "desired_temperatures": [20.0] * 48,
+                "penalty_factor": 5,
+            }
+            if with_gains:
+                tank["window_area"] = 25.0
+                tank["shgc"] = 0.6
+                tank["internal_gains_factor"] = 0.8
+            self.optim_conf["shared_thermal_tanks"] = [tank]
+            opt = self.create_optimization()
+            res = opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                np.full(48, 0.40),  # heating is costly -> the optimiser leans on free gains
+                np.full(48, 0.02),
+            )
+            return res["P_deferrable0"].sum()
+
+        self.assertLess(
+            heating_energy(True),
+            heating_energy(False),
+            "window solar + internal gains must reduce a building_demand tank's heating",
+        )
+
     def test_shared_tank_zone_window_solar_reduces_heating(self):
         """A zone tank with window_area gains solar through glazing (window_area *
         SHGC * GHI), so on a sunny day it needs less heating from its source than

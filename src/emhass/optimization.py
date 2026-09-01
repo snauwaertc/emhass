@@ -3653,6 +3653,23 @@ class Optimization:
                 "indoor_target_temperature",
                 min_temperatures_list[0] if min_temperatures_list else 20.0,
             )
+            # Window solar and internal gains belong INSIDE the physics demand
+            # model, exactly as the per-load thermal_config path passes them.
+            # Dropping them here left a building_demand tank's demand at the raw
+            # envelope loss (U*A*dT + ventilation) whatever window_area / shgc /
+            # internal_gains_factor said - and the window-gain block further down
+            # is gated to zone (loss_coefficient) tanks, so it fell through both
+            # (upstream #539 tester report).
+            window_area = tank.get("window_area", None)
+            shgc = float(tank.get("shgc", 0.6))
+            internal_gains_factor = float(tank.get("internal_gains_factor", 0.0))
+            solar_irradiance = None
+            if "ghi" in data_opt.columns and window_area is not None:
+                vals = np.asarray(data_opt["ghi"].values, dtype=float)
+                if len(vals) < required_len:
+                    vals = np.concatenate((vals, np.zeros(required_len - len(vals))))
+                solar_irradiance = vals[:required_len]
+            internal_gains_forecast = p_load if internal_gains_factor > 0 else None
             demand = utils.calculate_heating_demand_physics(
                 u_value=tank["u_value"],
                 envelope_area=tank["envelope_area"],
@@ -3661,6 +3678,11 @@ class Optimization:
                 indoor_target_temperature=indoor_target_temp,
                 outdoor_temperature_forecast=outdoor_temp_arr.tolist(),
                 optimization_time_step=int(self.freq.total_seconds() / 60),
+                solar_irradiance_forecast=solar_irradiance,
+                window_area=window_area,
+                shgc=shgc,
+                internal_gains_forecast=internal_gains_forecast,
+                internal_gains_factor=internal_gains_factor,
                 sense=tank.get("sense") or "heat",
             )
             heating_demand = heating_demand + np.array(demand[:required_len])
@@ -3697,8 +3719,9 @@ class Optimization:
         # Window solar gain for a building zone (kWh/step): sunlight transmitted
         # through glazing (window_area m2 * SHGC) offsets the heat the zone needs,
         # so on a sunny day the plan coasts instead of heating. Reuses the GHI
-        # forecast already fetched for PV. Only for zone tanks (loss_coefficient) -
-        # a building_demand tank already accounts for solar inside its demand model.
+        # forecast already fetched for PV. Only for zone tanks (loss_coefficient):
+        # a building_demand tank receives its window solar and internal gains inside
+        # the physics demand call above (the compiler rejects a tank that has both).
         if (
             tank.get("loss_coefficient") is not None
             and tank.get("window_area")
