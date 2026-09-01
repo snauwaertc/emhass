@@ -5000,7 +5000,7 @@ class Optimization:
             # as "Optimal (Incumbent)" - while infeasible/unbounded/None-value
             # results restore the static solve.
             if self._accept_dp_resolve(prob2.status, prob2.value):
-                self.prob = prob2
+                return prob2  # hand it to the caller; never replace the cached self.prob (#1048)
             else:
                 for v, val in saved_values:
                     v.value = val
@@ -7051,21 +7051,28 @@ class Optimization:
         # DP COP refinement. Self-triggering - corrects and re-solves only the
         # heat-pump tanks whose COP the static solve got wrong; a no-op when every
         # tank is already self-consistent or when cop_solver=static.
+        refined = None
         try:
-            self._refine_cop_with_dp(selected_solver, solver_opts)
+            refined = self._refine_cop_with_dp(selected_solver, solver_opts)
         except Exception as exc:
             self.logger.warning("DP COP refinement skipped (%s)", exc)
         # The problem whose status/value the extraction below reads. Stays
-        # self.prob on a clean solve; points at the relaxed problem after a
-        # retry WITHOUT replacing self.prob, so the cached problem survives
+        # self.prob on a clean solve; points at the accepted DP re-solve when the
+        # refinement produced one, or at the relaxed problem after a retry - in
+        # every case WITHOUT replacing self.prob, so the cached problem survives
         # intact for the next run (issue #1048: caching prob_relaxed made the
-        # stress-free, binary-relaxed rescue permanent).
-        solved_prob = self.prob
+        # stress-free, binary-relaxed rescue permanent, and caching the refined
+        # problem would bake one run's DP temperature bounds into every later run
+        # the same way). prob2 shares the static solve's variables, so the refined
+        # values are visible either way; only the objective/status live on prob2.
+        solved_prob = refined if refined is not None else self.prob
 
         # Check for failure or "bad" status. A 'user_limit' (time-limited) solve that
         # still carries a feasible incumbent is accepted, not discarded for the
         # binary-relaxed LP fallback - see _needs_relaxed_retry.
-        if self._needs_relaxed_retry(self.prob.status, self.prob.value):
+        # An accepted DP re-solve already passed the same acceptance policy, so it
+        # never needs the rescue; only the static solve is a retry candidate.
+        if refined is None and self._needs_relaxed_retry(self.prob.status, self.prob.value):
             self.logger.warning(
                 f"Optimization failed with status: '{self.prob.status}'. "
                 "Retrying with relaxed constraints (Continuous LP)..."
@@ -7184,16 +7191,16 @@ class Optimization:
                     params["q_input_var"] = original_q_input_vars[k]
                 else:
                     params.pop("q_input_var", None)
-        elif self.prob.status == "user_limit":
+        elif solved_prob.status == "user_limit":
             self.logger.info(
                 "Accepting time-limited solution (objective %.4g) - feasible incumbent, "
                 "skipping the relaxed LP fallback.",
-                self.prob.value,
+                solved_prob.value,
             )
             # Mark it so the downstream status gate keeps this binary-respecting
             # incumbent instead of discarding it (the relaxed LP would drop the
             # semi-continuous/single-constant binaries, which is physically wrong).
-            self.prob._status = "Optimal (Incumbent)"
+            solved_prob._status = "Optimal (Incumbent)"
 
         # Stage-timer breadcrumb: end of solve phase, start of extract phase.
         _extract_start_perf = time.perf_counter() if stage_times is not None else 0.0
