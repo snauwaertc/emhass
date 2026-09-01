@@ -5775,6 +5775,109 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(needs("unbounded", None))
         self.assertTrue(needs(None, None))
 
+    def _dp_refinable_setup(self):
+        """A heating-curve HP on a zone tank with cop_solver=dp: the DP refinement
+        always runs and produces a re-solve (prob2)."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [2.0] * 48
+        self._setup_single_hp(supply_temperature=40.0)
+        self.optim_conf["cop_solver"] = "dp"
+        self.optim_conf["def_load_config"] = [
+            {
+                "thermal_source": {
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 38,
+                        "min_supply": 28,
+                        "max_supply": 70,
+                    },
+                    "carnot_efficiency": 0.46,
+                }
+            }
+        ]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "house",
+                "load_ids": [0],
+                "thermal_mass": 8.0,
+                "loss_coefficient": 0.3,
+                "start_temperature": 20.5,
+                "min_temperatures": [19.5] * 48,
+                "max_temperatures": [23.0] * 48,
+                "desired_temperatures": [20.5] * 48,
+                "penalty_factor": 5,
+            }
+        ]
+        return self.create_optimization()
+
+    def test_dp_refinement_never_replaces_the_cached_problem(self):
+        """An accepted DP re-solve must be handed to the extraction (solved_prob)
+        without replacing self.prob. The refined problem carries extra DP
+        temperature-bound constraints; if it became self.prob it would be cached
+        and bake one run's DP bounds into every later run - the same class of
+        cache poisoning upstream removed for the relaxed rescue (#1048)."""
+        opt = self._dp_refinable_setup()
+        seen = {}
+        original = opt._refine_cop_with_dp
+
+        def spy(*args, **kwargs):
+            seen["prob_id"] = id(opt.prob)
+            seen["n_constraints"] = len(opt.prob.constraints)
+            return original(*args, **kwargs)
+
+        opt._refine_cop_with_dp = spy
+        # Force the acceptance branch so the test is about identity, not about
+        # whether this particular re-solve happened to be accepted.
+        accepted = {}
+
+        def always_accept(status, value):
+            accepted["called"] = True
+            return True
+
+        opt._accept_dp_resolve = always_accept
+        opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        self.assertTrue(accepted.get("called"), "the DP re-solve never reached acceptance")
+        self.assertEqual(
+            id(opt.prob), seen["prob_id"], "self.prob was replaced by the refined problem"
+        )
+        self.assertEqual(
+            len(opt.prob.constraints),
+            seen["n_constraints"],
+            "the cached problem must not carry the DP re-solve's extra constraints",
+        )
+
+    def test_dp_refined_time_limited_resolve_publishes_incumbent(self):
+        """When the accepted DP re-solve is itself time-limited (user_limit with a
+        feasible incumbent), the incumbent marking must apply to the problem the
+        extraction reads - the refined one - so it publishes as
+        'Optimal (Incumbent)' rather than being discarded as a raw user_limit."""
+
+        class FakeRefined:
+            def __init__(self):
+                self._status = "user_limit"
+                self.value = -12.5
+
+            @property
+            def status(self):
+                return self._status
+
+        opt = self._dp_refinable_setup()
+        opt._refine_cop_with_dp = lambda *a, **k: FakeRefined()
+        opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        self.assertEqual(opt.optim_status, "Optimal (Incumbent)")
+
     def test_dp_resolve_rejection_preserves_static_plan(self):
         """Coverage for the rejected-DP-re-solve path: the published plan must stay
         valid (not nulled) when the refinement re-solve is rejected. prob2 shares the
