@@ -84,14 +84,14 @@ def test_dp_per_step_ambient_prices_loss_per_step():
     mean: on a cold-night/mild-day horizon the store coasts down faster at night.
     (The LP's own tank dynamics use the per-step outdoor array; a mean-ambient DP
     disagrees with the LP on exactly the diurnal-swing days it should refine.)"""
-    base = dict(
-        heat_capacity=1.0,
-        loss_coeff=0.2,  # strong loss so the effect is unambiguous
-        min_temp=20.0,
-        max_temp=60.0,
-        demand_kw=0.0,
-        backup_max_power=0.0,
-    )
+    base = {
+        "heat_capacity": 1.0,
+        "loss_coeff": 0.2,  # strong loss so the effect is unambiguous
+        "min_temp": 20.0,
+        "max_temp": 60.0,
+        "demand_kw": 0.0,
+        "backup_max_power": 0.0,
+    }
     n = 8
     cold_then_warm = np.array([0.0] * 4 + [40.0] * 4)
     # Expensive flat price + no demand -> optimal policy is (near-)pure coasting.
