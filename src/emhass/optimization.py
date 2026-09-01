@@ -7152,6 +7152,15 @@ class Optimization:
             # 5. Restore Configuration
             self.optim_conf["treat_deferrable_load_as_semi_cont"] = original_semi_cont
             self.optim_conf["set_deferrable_load_single_constant"] = original_single_const
+
+            # Restore the instance-held references the rebuild replaced, so the
+            # next run reads the cached problem's own objects (issue #1048).
+            self.vars.update(original_hybrid_vars)
+            for k, params in self.param_thermal.items():
+                if k in original_q_input_vars:
+                    params["q_input_var"] = original_q_input_vars[k]
+                else:
+                    params.pop("q_input_var", None)
         elif self.prob.status == "user_limit":
             self.logger.info(
                 "Accepting time-limited solution (objective %.4g) - feasible incumbent, "
@@ -7162,15 +7171,6 @@ class Optimization:
             # incumbent instead of discarding it (the relaxed LP would drop the
             # semi-continuous/single-constant binaries, which is physically wrong).
             self.prob._status = "Optimal (Incumbent)"
-
-            # Restore the instance-held references the rebuild replaced, so the
-            # next run reads the cached problem's own objects (issue #1048).
-            self.vars.update(original_hybrid_vars)
-            for k, params in self.param_thermal.items():
-                if k in original_q_input_vars:
-                    params["q_input_var"] = original_q_input_vars[k]
-                else:
-                    params.pop("q_input_var", None)
 
         # Stage-timer breadcrumb: end of solve phase, start of extract phase.
         _extract_start_perf = time.perf_counter() if stage_times is not None else 0.0
