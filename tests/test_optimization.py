@@ -7867,6 +7867,12 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0]
         self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0]
         self.optim_conf["cop_solver"] = "auto"
+        # Solve to exact optimal: the energy assertions below sit within the
+        # shipped 1% lp_solver_mip_rel_gap, inside which HiGHS is free to return
+        # any incumbent (see the determinism note near BATTERY_TIEBREAK_EPS in
+        # optimization.py), which made the chiller-energy floor machine
+        # dependent. This scenario solves in ~1.5 s either way.
+        self.optim_conf["lp_solver_mip_rel_gap"] = 0.0
         self.optim_conf["def_load_config"] = [
             {
                 "thermal_source": {
