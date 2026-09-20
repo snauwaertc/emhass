@@ -203,6 +203,17 @@ omitting them keeps the existing water-tank behaviour unchanged.
 > Values are the thermal kWh delivered in each of the last `L` steps, oldest first; a shorter
 > list is right-aligned (the most recent steps are the ones still in flight). Omitting it
 > keeps the previous cold-start behaviour exactly, so existing configs are unaffected.
+>
+> **Keeping it up to date between runs.** `prior_heat` is a FIFO of the last `L` steps of heat
+> that was *actually delivered*, where `L` is `thermal_inertia` divided by the optimisation time
+> step, rounded to the nearest step. On every MPC tick, drop the oldest value and append the
+> thermal kWh delivered during the step that just ran. Do **not** refill it from the new plan's
+> own first `L` steps: that feeds the model its intentions rather than what the hardware did,
+> which is the very thing this initial condition exists to correct. The most faithful source is a
+> differenced heat or energy counter on the unit (thermal kWh per step, or electrical kWh times
+> the COP of that step); the executed step of the previous plan is a usable fallback when no
+> counter exists, as long as the unit follows its setpoints closely.
+>
 > The same applies to the classic per-load [`thermal_config`](thermal_model.md), whose
 > `prior_heat` is expressed in **input watts** per step - the unit that model already speaks.
 
