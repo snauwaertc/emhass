@@ -27,6 +27,8 @@ THERMAL_CONFIG_KNOWN_KEYS = frozenset(
         "overshoot_temperature",
         "penalty_factor",
         "sense",
+        "thermal_inertia",
+        "prior_heat",
     }
 )
 # Common singular typo -> (correct list key, what that key controls). The role
@@ -3135,6 +3137,23 @@ class Optimization:
         )
         sense_coeff = 1 if sense == "heat" else -1
 
+        # With none of the three demand models configured the code below reaches the
+        # degree-day call and dies on a bare KeyError('specific_heating_demand');
+        # name the options instead. Unlike a shared tank, a single thermal_battery
+        # with no demand model at all is never intentional, so this raises.
+        physics_keys = ("u_value", "envelope_area", "ventilation_rate", "heated_volume")
+        if not (
+            len(hc.get("draw_off_demand") or []) > 0
+            or all(key in hc for key in physics_keys)
+            or ("specific_heating_demand" in hc and "area" in hc)
+        ):
+            raise ValueError(
+                f"Load {k}: thermal_battery requires a demand model - 'draw_off_demand' "
+                "(hot-water profile), the physics keys 'u_value' + 'envelope_area' + "
+                "'ventilation_rate' + 'heated_volume', or 'specific_heating_demand' + "
+                "'area' (degree-day model); none configured"
+            )
+
         # Use parameterized values if available (enables warm-start on cache hit)
         if k in self.param_thermal:
             params = self.param_thermal[k]
@@ -5505,8 +5524,11 @@ class Optimization:
         ``time_limit``; handing it the full budget again can nearly double a
         cycle's wall clock on exactly the hard problems that hit the limit. It
         warm-starts from the static solution and only adds bound constraints, so
-        half the budget (floor 10 s) is ample; a timeout still degrades safely
-        (the static solve is restored). Returns a copy - never mutates the input.
+        half the budget (floor 10 s) is ample. A ``user_limit`` (timeout) result is
+        still ACCEPTED by ``_accept_dp_resolve`` when it carries a feasible
+        incumbent, exactly as on the main solve path; only a genuinely unusable
+        result (infeasible, unbounded, or no incumbent value at all) falls back to
+        the static solve. Returns a copy - never mutates the input.
         """
         opts = dict(solver_opts)
         if "time_limit" in opts:
