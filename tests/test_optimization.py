@@ -6104,6 +6104,104 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             "the cached problem must not carry the DP re-solve's extra constraints",
         )
 
+    def test_relaxed_rescue_restores_dp_and_semi_cont_registries(self):
+        """The binary-relaxed LP rescue rebuilds the deferrable-load constraints a
+        second time, which resets and repopulates `_dp_tank_entries` and
+        `_semi_cont_on_level` from that throwaway build. self.prob is deliberately
+        left untouched (#1048), so the registries must be restored to the cached
+        problem's own objects - otherwise every later run's DP COP refinement reads
+        a Variable and mutates a Parameter that the solved problem never sees, and a
+        semi-continuous load loses its on-level Parameter outright (the rescue forces
+        treat_deferrable_load_as_semi_cont to all-False before rebuilding)."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [0.0] * 48
+        self._setup_single_hp(nominal=6000)
+        # A heating-curve HP: only a curve-driven source registers a DP tank entry.
+        self.optim_conf["def_load_config"] = [
+            {
+                "thermal_source": {
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 30,
+                        "min_supply": 25,
+                        "max_supply": 40,
+                    },
+                    "carnot_efficiency": 0.45,
+                    "max_supply_temperature": 62,
+                }
+            },
+        ]
+        # Semi-continuous so the original build registers an on-level Parameter.
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [True]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "buffer",
+                "load_ids": [0],
+                "thermal_mass": 3.0,
+                "loss_coefficient": 0.2,
+                "start_temperature": 35.0,
+                "min_temperatures": [30.0] * 48,
+                "max_temperatures": [60.0] * 48,
+                "draw_off_demand": [2.0] * 48,
+            }
+        ]
+        self.optim_conf["cop_solver"] = "auto"
+        opt = self.create_optimization()
+        unit_load_cost = np.array([0.05] * 24 + [0.40] * 24)
+        unit_prod_price = np.full(48, 0.02)
+        args = (
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            unit_load_cost,
+            unit_prod_price,
+        )
+
+        # Call 1: an ordinary solve; it builds and caches self.prob plus both registries.
+        res1 = opt.perform_optimization(*args)
+        self.assertIn("Optimal", str(res1["optim_status"].iloc[0]))
+        prob_id = id(opt.prob)
+        entry1 = opt._dp_tank_entries[0]
+        cop_param1 = entry1["hp"]["cop_param"]
+        on_level1 = opt._semi_cont_on_level.get(0)
+        self.assertIsNotNone(on_level1, "load 0 must be semi-continuous in the first build")
+        self.assertTrue(
+            any(entry1["predicted_temp"] is v for v in opt.prob.variables()),
+            "the registered DP temperature Variable must belong to the cached problem",
+        )
+        self.assertTrue(
+            any(cop_param1 is p for p in opt.prob.parameters()),
+            "the registered COP Parameter must belong to the cached problem",
+        )
+
+        # Call 2: force the relaxed-LP rescue on the cached problem. The DP refinement
+        # is stubbed out because a successful refinement short-circuits the retry test.
+        opt._refine_cop_with_dp = lambda *a, **k: None
+        opt._needs_relaxed_retry = lambda *a, **k: True
+        res2 = opt.perform_optimization(*args)
+        self.assertEqual(str(res2["optim_status"].iloc[0]), "Optimal (Relaxed)")
+        self.assertEqual(id(opt.prob), prob_id, "the cached problem must not be replaced")
+        self.assertIs(
+            opt._dp_tank_entries[0]["predicted_temp"],
+            entry1["predicted_temp"],
+            "the DP registry must point back at the cached problem's temperature Variable",
+        )
+        self.assertIs(
+            opt._dp_tank_entries[0]["hp"]["cop_param"],
+            cop_param1,
+            "the DP registry must point back at the cached problem's COP Parameter",
+        )
+        self.assertIs(
+            opt._semi_cont_on_level.get(0),
+            on_level1,
+            "the semi-continuous on-level Parameter for load 0 must survive the rescue",
+        )
+        self.assertTrue(
+            any(opt._dp_tank_entries[0]["hp"]["cop_param"] is p for p in opt.prob.parameters()),
+            "the COP Parameter a later DP refinement mutates must be one the cached "
+            "problem actually solves, not an orphan from the abandoned relaxed rebuild",
+        )
+
     def test_dp_refined_time_limited_resolve_publishes_incumbent(self):
         """When the accepted DP re-solve is itself time-limited (user_limit with a
         feasible incumbent), the incumbent marking must apply to the problem the

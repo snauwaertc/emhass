@@ -7262,6 +7262,8 @@ class Optimization:
                 if "q_input_var" in params
             }
             original_transfer_vars = getattr(self, "transfer_vars", {})
+            original_dp_tank_entries = self._dp_tank_entries
+            original_semi_cont_on_level = self._semi_cont_on_level
 
             # Relax Configuration: Disable Binary Logic
             n_def = self.optim_conf["number_of_deferrable_loads"]
@@ -7352,6 +7354,8 @@ class Optimization:
                     params["q_input_var"] = original_q_input_vars[k]
                 else:
                     params.pop("q_input_var", None)
+            self._dp_tank_entries = original_dp_tank_entries
+            self._semi_cont_on_level = original_semi_cont_on_level
         elif solved_prob.status == "user_limit":
             self.logger.info(
                 "Accepting time-limited solution (objective %.4g) - feasible incumbent, "
