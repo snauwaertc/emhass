@@ -6602,7 +6602,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
         return opt, res
 
-    def _run_hp_curve_soft_comfort(self, max_thermal_power):
+    def _run_hp_curve_soft_comfort(self, max_thermal_power, min_power=None):
         """A heating_curve HP (Parameter COP) feeding a tank with a SOFT comfort
         target (desired_temperature). Warm 20 C outdoor -> curve supply 28 C ->
         COP clamps to 8, so the cap (if set) binds. Cheap flat price. The HP
@@ -6619,6 +6619,8 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         }
         if max_thermal_power is not None:
             hp["max_thermal_power"] = max_thermal_power
+        if min_power is not None:
+            hp["min_power"] = min_power
         topo = {
             "sources": [hp],
             "storage": [
@@ -6698,6 +6700,45 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             15000.0 + 1e-3,
             "ON-state delivered heat must respect max_thermal_power",
         )
+
+    def test_min_power_above_capped_on_level_warns(self):
+        """Regression (min_power x max_thermal_power): lowering a capped source's
+        semi-continuous ON level to cap/COP does not touch the separate
+        `p >= min_power * bin` constraint. When cap/COP < min_power the two
+        collide on the same binary, OFF becomes the only feasible state and the
+        source is abandoned for the whole horizon - silently, with an 'Optimal'
+        status. The unit really cannot run there (lowering min_power would let
+        the model modulate below the hardware's floor), so the fix is to say so:
+        exactly one warning naming the source, the affected step count and the
+        two colliding config keys."""
+        with self.assertLogs(level="WARNING") as logs:
+            opt, res = self._run_hp_curve_soft_comfort(max_thermal_power=15000, min_power=2000)
+        # COP 8 at every step -> cap/COP = 1875 W < min_power 2000 W everywhere.
+        matching = [
+            m
+            for m in logs.output
+            if "load 0" in m and "min_power" in m and "max_thermal_power" in m
+        ]
+        self.assertEqual(
+            len(matching), 1, f"expected exactly one collision warning, got {logs.output}"
+        )
+        self.assertGreaterEqual(
+            matching[0].count("48"), 2, f"warning must state 48 affected steps of 48: {matching[0]}"
+        )
+        # Warning only: the solve is unchanged (the source stays abandoned).
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertAlmostEqual(res["P_deferrable0"].sum(), 0.0, places=3)
+        self.assertAlmostEqual(res["P_deferrable0"].max(), 0.0, places=3)
+
+    def test_min_power_below_capped_on_level_does_not_warn(self):
+        """Control for the collision warning above: with min_power 1500 W the
+        lowered ON level (cap/COP = 1875 W) clears the modulation floor at every
+        step, so the capped HP runs normally and nothing must be logged."""
+        with self.assertNoLogs(level="WARNING"):
+            opt, res = self._run_hp_curve_soft_comfort(max_thermal_power=15000, min_power=1500)
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertAlmostEqual(res["P_deferrable0"].sum(), 7500.0, places=3)
+        self.assertAlmostEqual(res["P_deferrable0"].max(), 1875.0, places=3)
 
     def test_max_thermal_power_caps_heat_pump_under_high_cop(self):
         """A per-source max_thermal_power bounds delivered heat (cop * electrical)
