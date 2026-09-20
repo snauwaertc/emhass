@@ -5930,6 +5930,49 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(np.all(flow <= 20000 + 1e-3), "pump flow within max_transfer_power")
         self.assertGreater(flow.max(), 0.0, "the pump must run to hold the cold house")
 
+    def test_shared_tank_member_publishes_comfort_columns(self):
+        """A load that is a member of a shared thermal tank must publish the same
+        comfort columns as a standalone thermal_config/thermal_battery load: the
+        desired/min/max bounds live on the owning tank, not on the member's own
+        def_load_config entry (which carries thermal_source), so they were silently
+        never emitted. A scalar desired_temperatures is broadcast over the horizon."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self._setup_single_hp(nominal=3000)
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "dhw",
+                "load_ids": [0],
+                "volume": 0.2,
+                "density": 1000,
+                "heat_capacity": 4.186,
+                "start_temperature": 50.0,
+                "thermal_loss": 0.05,
+                "desired_temperatures": 50.0,  # bare scalar, not a list
+                "min_temperatures": [35.0] * 48,
+                "max_temperatures": [55.0] * 48,
+                "overshoot_temperature": 52.0,
+            },
+        ]
+        opt = self.create_optimization()
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertIn("target_temp_heater0", res.columns)
+        self.assertIn("min_temp_heater0", res.columns)
+        self.assertIn("max_temp_heater0", res.columns)
+        # The scalar desired_temperatures is broadcast across the whole horizon.
+        self.assertTrue((res["target_temp_heater0"] == 50.0).all())
+        self.assertTrue((res["min_temp_heater0"] == 35.0).all())
+        self.assertTrue((res["max_temp_heater0"] == 55.0).all())
+        # Already-working columns must stay unaffected.
+        self.assertIn("predicted_temp_heater0", res.columns)
+        self.assertIn("heating_demand_heater0", res.columns)
+
     def test_needs_relaxed_retry_accepts_time_limited_incumbent(self):
         """A time-limited (user_limit) solve with a feasible incumbent must be accepted,
         not discarded for the binary-relaxed LP fallback - that is the fix for the
