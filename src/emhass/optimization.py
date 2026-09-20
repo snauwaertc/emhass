@@ -2916,7 +2916,9 @@ class Optimization:
 
         # Thermal Inertia Logic
         thermal_inertia = hc.get("thermal_inertia", 0.0)
-        L = int(thermal_inertia / self.time_step)
+        L = self._resolve_lag_steps(
+            thermal_inertia, self.time_step, required_len, self.logger, f"Load {k}"
+        )
 
         # Define Temperature State Variable
         predicted_temp = cp.Variable(required_len, name=f"temp_load_{k}")
@@ -2928,12 +2930,16 @@ class Optimization:
 
         # Main Dynamics (Delayed Power)
         # T[t+1] depends on T[t] and P[t-L]
-        constraints.append(
-            predicted_temp[1 + L :]
-            == predicted_temp[L:-1]
-            + (p_deferrable[: -1 - L] * sense_coeff * heat_factor)
-            - (cool_factor * (predicted_temp[L:-1] - outdoor_temp[L:-1]))
-        )
+        # At the top of the clamp (L == required_len - 1) this block spans zero rows:
+        # the dead zone below already pins every remaining step, so there is nothing
+        # left to constrain and building it anyway is a cvxpy dimension error.
+        if 1 + L < required_len:
+            constraints.append(
+                predicted_temp[1 + L :]
+                == predicted_temp[L:-1]
+                + (p_deferrable[: -1 - L] * sense_coeff * heat_factor)
+                - (cool_factor * (predicted_temp[L:-1] - outdoor_temp[L:-1]))
+            )
 
         # Startup "Dead Zone" Dynamics
         # This horizon's own power has not arrived yet, but heat committed before the
@@ -3061,6 +3067,29 @@ class Optimization:
         if vals:
             prior[prior.size - len(vals) :] = vals
         return prior
+
+    @staticmethod
+    def _resolve_lag_steps(thermal_inertia, time_step, required_len, logger, label):
+        """Return the lag length, in timesteps, of a `thermal_inertia` (hours) setting.
+
+        Both thermal builders resolve the lag here so that one config value cannot
+        mean two different models: the count is rounded to the NEAREST step (0.75 h
+        at a 0.5 h step is 1.5 steps, i.e. a lag of 2), and clamped to
+        `required_len - 1` so the lagged window always stays inside the horizon.
+
+        An inertia shorter than half a timestep resolves to no lag at all, which
+        silently disables both the dead zone and any `prior_heat` seeded for it -
+        easy to misconfigure and invisible without a log line, hence the warning.
+        """
+        thermal_inertia = float(thermal_inertia)
+        lag_steps = max(0, min(int(round(thermal_inertia / time_step)), required_len - 1))
+        if thermal_inertia > 0 and lag_steps == 0:
+            logger.warning(
+                f"{label}: thermal_inertia {thermal_inertia} h is shorter than half a "
+                f"timestep ({time_step} h) and resolves to 0 lag steps - the lag, and "
+                "any prior_heat given for it, have no effect."
+            )
+        return lag_steps
 
     def _resolve_draw_off_demand(self, hc, base_loss, required_len):
         """Return (demand_arr, loss_arr) if hot-water-tank mode (draw_off_demand present), else None."""
@@ -3595,12 +3624,12 @@ class Optimization:
             loss_coefficient = float(loss_coefficient)
             if loss_coefficient < 0:
                 raise ValueError(f"Shared tank {tank_id}: loss_coefficient must be >= 0 kW/K")
-        lag_steps = max(
-            0,
-            min(
-                int(round(float(tank.get("thermal_inertia", 0.0)) / self.time_step)),
-                required_len - 1,
-            ),
+        lag_steps = self._resolve_lag_steps(
+            tank.get("thermal_inertia", 0.0),
+            self.time_step,
+            required_len,
+            self.logger,
+            f"Shared tank {tank_id}",
         )
 
         start_temperature = float(tank.get("start_temperature", 20.0))
@@ -3891,17 +3920,22 @@ class Optimization:
                 + conversion
                 * (sense_coeff * prior_heat + xfer_net[:L] - heating_demand[:L] - loss_vec[:L])
             )
-            constraints.append(
-                predicted_temp[1 + L :]
-                == predicted_temp[L:-1]
-                + conversion
-                * (
-                    sense_coeff * _raw_heat(-1 - L)
-                    + xfer_net[L:]
-                    - heating_demand[L:-1]
-                    - loss_vec[L:-1]
+            # At the top of the clamp (L == required_len - 1) the dead zone above
+            # already covers the whole remaining horizon, so this block spans zero
+            # rows: there is nothing left for it to constrain, and building it anyway
+            # is a cvxpy dimension error.
+            if 1 + L < required_len:
+                constraints.append(
+                    predicted_temp[1 + L :]
+                    == predicted_temp[L:-1]
+                    + conversion
+                    * (
+                        sense_coeff * _raw_heat(-1 - L)
+                        + xfer_net[L:]
+                        - heating_demand[L:-1]
+                        - loss_vec[L:-1]
+                    )
                 )
-            )
 
         # Recovery grace: if the tank STARTS below a hard minimum it must satisfy
         # soon (a momentary out-of-band sensor read - e.g. a zone dips below its

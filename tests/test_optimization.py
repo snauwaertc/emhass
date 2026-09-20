@@ -6159,6 +6159,184 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             seeded[1], base[1] + 1.0, "per-load dead zone must honour in-flight heat"
         )
 
+    def test_lag_steps_helper_rounds_to_nearest_step(self):
+        """thermal_inertia -> lag-step count must be ONE shared rule for both thermal
+        builders. 0.75 h at a 0.5 h step is 1.5 steps: the per-load path truncated
+        that to 1 while the shared-tank path rounded it to 2, so one config value
+        produced two different models. Rounding is the agreed rule, and the clamp
+        keeps the lag inside the horizon."""
+        self.assertEqual(Optimization._resolve_lag_steps(0.75, 0.5, 48, logger, "unit test"), 2)
+        # Exact ratios are untouched (all existing thermal_inertia tests use 1.0/0.5).
+        self.assertEqual(Optimization._resolve_lag_steps(1.0, 0.5, 48, logger, "unit test"), 2)
+        # No inertia -> no lag, and an oversized one clamps to required_len - 1.
+        self.assertEqual(Optimization._resolve_lag_steps(0.0, 0.5, 48, logger, "unit test"), 0)
+        self.assertEqual(Optimization._resolve_lag_steps(100.0, 0.5, 48, logger, "unit test"), 47)
+
+    def test_per_load_thermal_inertia_rounds_the_lag_like_the_shared_tank(self):
+        """The per-load path used int() (truncation) where the shared-tank path used
+        round(), so thermal_inertia=0.75 h at a 0.5 h step resolved to L=1 instead of
+        L=2 and the heater's own heat reached predicted_temp[2] one step too early.
+        With the shared rounding rule index 2 is inside the dead zone, governed purely
+        by cooling from the fixed start, so a hard 18.0 C floor there is unreachable."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
+        self.df_input_data_dayahead[self.opt.var_load_cost] = 0.0
+        self.df_input_data_dayahead[self.opt.var_prod_price] = 0.0
+        min_temps = [0] * 48
+        min_temps[2] = 18.0
+        self.optim_conf["def_load_config"] = [
+            {},
+            {
+                "thermal_config": {
+                    "heating_rate": 10.0,
+                    "cooling_constant": 0.5,
+                    "start_temperature": 20.0,
+                    "thermal_inertia": 0.75,  # 0.75/0.5 = 1.5 -> int() 1, round() 2
+                    "sense": "heat",
+                    "min_temperatures": min_temps,
+                    "max_temperatures": [30.0] * 48,
+                }
+            },
+        ]
+        self.optim_conf["nominal_power_of_deferrable_loads"][1] = 3000
+        opt = self.create_optimization()
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        # With L=1 the model was Optimal and lifted predicted_temp[2] to ~20.62 with
+        # the heater at 3000 W. With L=2 that temperature is pure cooling physics
+        # (20.0 -> 17.5 -> 15.625), below the 18.0 floor, so the problem cannot be
+        # solved as posed - either status it reaches, the old answer must be gone.
+        if opt.optim_status == "Optimal":
+            temp = res["predicted_temp_heater1"].to_numpy()
+            self.assertLess(
+                temp[2],
+                17.0,
+                "predicted_temp[2] is inside the dead zone once the lag rounds to 2",
+            )
+        else:
+            self.assertEqual(opt.optim_status, "Infeasible")
+
+    def test_shared_tank_lag_at_the_clamp_boundary_builds(self):
+        """thermal_inertia=23.5 h at a 0.5 h step is exactly required_len - 1 = 47
+        steps, so the lagged 'main dynamics' block spans zero rows on every operand
+        and cvxpy raised `ValueError: Invalid dimensions (0,).` while building it -
+        before any solve. The dead zone already pins every remaining row there, so
+        the block must simply be skipped."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [5.0] * 48
+        self._setup_single_hp(supply_temperature=40.0)
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "house",
+                "load_ids": [0],
+                "thermal_mass": 8.0,
+                "loss_coefficient": 0.3,
+                "thermal_inertia": 23.5,  # 23.5/0.5 = 47 == required_len - 1
+                "start_temperature": 20.5,
+                # Deliberately wide, so nothing but the build bug can fail this.
+                "min_temperatures": [-50.0] * 48,
+                "max_temperatures": [100.0] * 48,
+            }
+        ]
+        opt = self.create_optimization()
+        opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        self.assertIn(opt.optim_status, ("Optimal", "Optimal (Relaxed)"))
+
+    def test_per_load_lag_at_the_clamp_boundary_builds(self):
+        """The per-load path had no clamp at all, so the same 47-step boundary blew
+        up in cvxpy there too. The shared helper clamps it and the empty-block guard
+        keeps the build valid."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
+        self.optim_conf["def_load_config"] = [
+            {},
+            {
+                "thermal_config": {
+                    "heating_rate": 10.0,
+                    "cooling_constant": 0.5,
+                    "start_temperature": 20.0,
+                    "thermal_inertia": 23.5,  # 23.5/0.5 = 47 == required_len - 1
+                    "sense": "heat",
+                    "min_temperatures": [0] * 48,
+                    "max_temperatures": [30.0] * 48,
+                }
+            },
+        ]
+        self.optim_conf["nominal_power_of_deferrable_loads"][1] = 3000
+        opt = self.create_optimization()
+        opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        self.assertIn(opt.optim_status, ("Optimal", "Optimal (Relaxed)"))
+
+    def test_lag_steps_warns_when_inertia_rounds_to_zero(self):
+        """A thermal_inertia shorter than half a timestep resolves to no lag at all -
+        the setting, and any prior_heat seeded for it, are then silently inert. That
+        is easy to misconfigure and invisible without a log line."""
+
+        def build(thermal_inertia):
+            self.df_input_data_dayahead = self.prepare_forecast_data()
+            self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
+            self.df_input_data_dayahead[self.opt.var_load_cost] = 0.0
+            self.df_input_data_dayahead[self.opt.var_prod_price] = 0.0
+            thermal_config = {
+                "heating_rate": 10.0,
+                "cooling_constant": 0.5,
+                "start_temperature": 20.0,
+                "sense": "heat",
+                "min_temperatures": [0] * 48,
+                "max_temperatures": [30.0] * 48,
+            }
+            if thermal_inertia is not None:
+                thermal_config["thermal_inertia"] = thermal_inertia
+            self.optim_conf["def_load_config"] = [{}, {"thermal_config": thermal_config}]
+            self.optim_conf["nominal_power_of_deferrable_loads"][1] = 3000
+            # __init__ logs an unrelated warning of its own for any thermal_config
+            # carrying a thermal_inertia key, so build BEFORE capturing.
+            return self.create_optimization()
+
+        def solve(opt):
+            return opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                self.df_input_data_dayahead[opt.var_load_cost].values,
+                self.df_input_data_dayahead[opt.var_prod_price].values,
+            )
+
+        opt = build(0.1)  # 0.1/0.5 = 0.2 -> 0 lag steps
+        with self.assertLogs(level="WARNING") as logs:
+            solve(opt)
+        self.assertTrue(
+            any("lag steps" in msg for msg in logs.output),
+            f"expected a zero-lag warning, got {logs.output}",
+        )
+
+        # No warning when there is no inertia configured at all...
+        opt = build(None)
+        with self.assertNoLogs(level="WARNING"):
+            solve(opt)
+
+        # ...nor when the inertia resolves to a real lag.
+        opt = build(1.0)
+        with self.assertNoLogs(level="WARNING"):
+            solve(opt)
+
     def test_shared_tank_building_demand_honours_window_and_internal_gains(self):
         """A building_demand shared tank (u_value / envelope_area / ventilation_rate /
         heated_volume) must account for window solar gain and internal gains INSIDE
