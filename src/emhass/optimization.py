@@ -4605,6 +4605,24 @@ class Optimization:
                 on_level.value = np.minimum(
                     on_level.value, float(thermal_cap) / np.maximum(cop_vals, 1e-9)
                 )
+                # That level collides with the load's own modulation floor:
+                # `p == on_level * bin` and `p >= min_power * bin` share a binary,
+                # so where cap/COP < min_power OFF is the only feasible state and
+                # the source is silently dropped - warn, do not lower the floor.
+                cap_over_cop = float(thermal_cap) / np.maximum(cop_vals, 1e-9)
+                min_power_k = self.optim_conf["minimum_power_of_deferrable_loads"][k]
+                below_min = int(np.count_nonzero(cap_over_cop < min_power_k))
+                if min_power_k > 0 and below_min > 0:
+                    self.logger.warning(
+                        "Shared tank '%s': load %s cannot run at %s/%s steps; its "
+                        "min_power (%s W) exceeds the level max_thermal_power allows "
+                        "(cap/COP), so those steps are forced off.",
+                        tank_id,
+                        k,
+                        below_min,
+                        required_len,
+                        min_power_k,
+                    )
 
         # Soft comfort constraints (issue #539): the tank's desired_temperatures
         # set a comfort target whose shortfall is penalized in the objective
