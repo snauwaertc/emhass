@@ -7230,7 +7230,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
         return opt, res
 
-    def _run_hp_curve_soft_comfort(self, max_thermal_power, min_power=None):
+    def _run_hp_curve_soft_comfort(self, max_thermal_power, min_power=None, cop_solver="static"):
         """A heating_curve HP (Parameter COP) feeding a tank with a SOFT comfort
         target (desired_temperature). Warm 20 C outdoor -> curve supply 28 C ->
         COP clamps to 8, so the cap (if set) binds. Cheap flat price. The HP
@@ -7270,7 +7270,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.df_input_data_dayahead["outdoor_temperature_forecast"] = [20.0] * 48
         for key, val in compiled.items():
             self.optim_conf[key] = val
-        self.optim_conf["cop_solver"] = "static"
+        self.optim_conf["cop_solver"] = cop_solver
         opt = self.create_optimization()
         ulc = np.full(48, 0.10)
         upp = self.df_input_data_dayahead[opt.var_prod_price].values
@@ -7357,6 +7357,23 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opt.optim_status, "Optimal")
         self.assertAlmostEqual(res["P_deferrable0"].sum(), 0.0, places=3)
         self.assertAlmostEqual(res["P_deferrable0"].max(), 0.0, places=3)
+
+    def test_min_power_collision_warned_after_dp_refinement(self):
+        """The DP COP refinement re-derives a capped semi-continuous source's ON
+        level from the refined COP, and a refined COP can push cap/COP below
+        min_power at steps the static solve did not flag. The build-time collision
+        warning must therefore also be raised where the DP lowers the level, or
+        those steps are dropped silently in the re-solve."""
+        with self.assertLogs(level="WARNING") as logs:
+            self._run_hp_curve_soft_comfort(
+                max_thermal_power=15000, min_power=2000, cop_solver="dp"
+            )
+        dp_warnings = [
+            m
+            for m in logs.output
+            if "min_power" in m and "DP COP refinement" in m and "load 0" in m
+        ]
+        self.assertTrue(dp_warnings, f"no collision warning from the DP re-solve: {logs.output}")
 
     def test_min_power_below_capped_on_level_does_not_warn(self):
         """Control for the collision warning above: with min_power 1500 W the
