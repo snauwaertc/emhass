@@ -380,9 +380,9 @@ reflected in the true COP at each hour instead of being averaged away.
 
 The refinement is controlled by two `optim_conf` options:
 
-- `cop_solver` (`auto` | `dp` | `static`): `auto` runs the consistency check and
-  engages the DP only when the static COP is inconsistent (the default); `dp` always
-  runs it; `static` disables it and keeps the pure-LP plan.
+- `cop_solver` (`auto` | `dp` | `static`): `static` (the default) disables the
+  refinement and keeps the pure-LP plan; `auto` runs the consistency check and engages
+  the DP only when the static COP is inconsistent; `dp` always runs it.
 - `cop_solver_tolerance` (float, in COP units): how large a COP discrepancy
   (the max absolute difference between the COP the solve used and the COP at the
   temperature it achieved) `auto` tolerates before engaging the DP.
@@ -391,23 +391,23 @@ The refinement is controlled by two `optim_conf` options:
 
 A MILP solver does two things: it *finds* a good integer solution, and then it
 *proves* that solution is optimal by closing the gap between the best solution and
-the best theoretical bound. With `lp_solver_mip_rel_gap = 0` (the default) it must
-drive that gap to zero - prove exact optimality - and that proof is the expensive
-part. The number of binary variables (mutual-exclusion groups, the
+the best theoretical bound. `lp_solver_mip_rel_gap` sets how close the proof has to
+get: the default `0.01` stops once the plan is provably within 1% of optimal, and `0`
+demands a proof of exact optimality - which is the expensive part. The number of binary variables (mutual-exclusion groups, the
 `max_supply_temperature` cap gates, semi-continuous and single-constant loads)
 grows with the horizon, so the branch-and-bound search can explode on a long
 horizon or a rich [heat topology](heat_topology.md).
 
 Concretely: a 48-hour (96-step) day-ahead optimization of a hybrid system with
 several tanks and mutual-exclusion groups can fail to solve within any practical
-`lp_solver_timeout` at `gap = 0` (it returns `User_Limit` with no plan), because the
-solver keeps trying to *prove* optimality long after it has *found* the optimum.
-Setting `lp_solver_mip_rel_gap` to a small value (e.g. `0.02`) tells it to stop once
-the solution is provably within 2% of optimal - which collapses the same problem to
-a few seconds. In practice the quality cost is negligible (the returned plan is
+`lp_solver_timeout` at a tight gap (it returns `User_Limit` with no plan), because
+the solver keeps trying to *prove* optimality long after it has *found* the optimum.
+Loosening `lp_solver_mip_rel_gap` a little (e.g. from the default `0.01` to `0.02`)
+tells it to stop once the solution is provably within 2% of optimal - which can
+collapse the same problem to a few seconds. In practice the quality cost is negligible (the returned plan is
 typically the true optimum; only the *certificate* is relaxed). Reach for this lever
 whenever a long horizon, many deferrable loads, or a complex topology makes the
-solve time-out; a 24-hour horizon usually solves fast enough at `gap = 0`. See
+solve time-out; a 24-hour horizon usually solves fast enough at the default. See
 `lp_solver_mip_rel_gap` in [the configuration reference](config.md).
 
 ## The EMHASS optimizations

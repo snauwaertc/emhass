@@ -141,7 +141,7 @@ same physics as a standalone [thermal_battery](thermal_battery.md):
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `id` | string | required | Unique across storage. |
-| `volume` | number | required* | Litres. *Required unless `thermal_mass` is given (a building zone). |
+| `volume` | number | required* | Cubic metres (m3), so a 200 L tank is `0.2`. *Required unless `thermal_mass` is given (a building zone). |
 | `density` | number | `1000` | kg/m3 (use ~`997` for hot water). |
 | `heat_capacity` | number | `4.186` | kJ/(kg.K). |
 | `start_temperature` | number | `20.0` | Initial tank temperature (degC). |
@@ -332,14 +332,14 @@ heat pump is priced on electricity; the gas boiler on gas.
   "storage": [
     {
       "id": "buffer",
-      "volume": 200,
+      "volume": 0.2,
       "start_temperature": 40,
       "min_temperature_curve": { "slope": -0.8, "offset": 30, "min_supply": 28, "max_supply": 55 },
       "max_temperature": [55, 55, 55, 55]
     },
     {
       "id": "dhw",
-      "volume": 150,
+      "volume": 0.15,
       "density": 997,
       "start_temperature": 52,
       "min_temperature": [48, 48, 48, 48],

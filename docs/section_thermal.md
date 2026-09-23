@@ -59,8 +59,9 @@ the linear program plans against a linearized COP, then an exact
 on is consistent with the COP it assumed, and if not re-solves the store's
 temperature trajectory against the *true* temperature-dependent COP. This is what
 lets the optimizer safely **super-heat a buffer into surplus PV** without being
-fooled by an over-optimistic COP. The DP runs automatically only when it is
-needed and is a no-op otherwise.
+fooled by an over-optimistic COP. It is opt-in: with `cop_solver: auto` the DP runs
+only when it is needed and is a no-op otherwise (the default, `static`, keeps the
+plain COP).
 
 The mechanics - the COP non-convexity, the DP refinement, the PV marginal price,
 the shared-tank constraints, and the start-temperature recovery - are documented
