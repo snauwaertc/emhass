@@ -1857,6 +1857,107 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("prior_heat", out["shared_thermal_tanks"][0])
             self.assertTrue(any(needle in m for m in log_cm.output), f"expected {needle!r} warning")
 
+    async def test_compile_heat_topology_rejects_id_used_by_source_and_storage(self):
+        """A flow's `from` is resolved against sources first, so an id shared by a
+        source and a storage silently turned a tank->tank transfer into a source
+        load (a phantom heater with the source's power) with no error."""
+        topo = {
+            "sources": [
+                {"id": "buf", "type": "electric", "efficiency": 1.0, "nominal_power": 5000}
+            ],
+            "storage": [
+                {"id": "buf", "volume": 0.1, "start_temperature": 40.0},
+                {"id": "room", "thermal_mass": 10.0, "start_temperature": 20.0},
+            ],
+            "flows": [
+                {"from": "buf", "to": "buf"},
+                {
+                    "from": "buf",
+                    "to": "room",
+                    "transfer_coefficient": 0.5,
+                    "max_transfer_power": 4000,
+                },
+            ],
+        }
+        with self.assertRaises(ValueError) as cm:
+            utils.compile_heat_topology(topo)
+        self.assertIn("buf", str(cm.exception))
+
+    async def test_compile_heat_topology_missing_fields_raise_valueerror(self):
+        """Missing required fields must raise ValueError naming the field, not a
+        bare KeyError: callers (the web UI's save-time validation) only catch
+        ValueError, so a KeyError surfaced as an unhandled 500."""
+        no_efficiency = {
+            "sources": [{"id": "gas", "type": "gas", "nominal_power": 20000}],
+            "storage": [{"id": "dhw", "volume": 0.2}],
+            "flows": [{"from": "gas", "to": "dhw"}],
+        }
+        with self.assertRaises(ValueError) as cm:
+            utils.compile_heat_topology(no_efficiency)
+        self.assertIn("efficiency", str(cm.exception))
+        no_profile = {
+            "sources": [{"id": "gas", "type": "gas", "efficiency": 0.9, "nominal_power": 20000}],
+            "storage": [{"id": "dhw", "volume": 0.2}],
+            "flows": [{"from": "gas", "to": "dhw"}],
+            "consumers": [{"id": "tap", "type": "profile", "target": "dhw"}],
+        }
+        with self.assertRaises(ValueError) as cm:
+            utils.compile_heat_topology(no_profile)
+        self.assertIn("profile", str(cm.exception))
+
+    async def _treat_with_optim_conf(self, extra_optim_conf):
+        params = await TestUtils.get_test_params()
+        params_json = orjson.dumps(params).decode("utf-8")
+        retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params_json, logger)
+        optim_conf.update(extra_optim_conf)
+        _, _, optim_conf_out, _ = await treat_runtimeparams(
+            orjson.dumps({}).decode("utf-8"),
+            params_json,
+            retrieve_hass_conf,
+            optim_conf,
+            plant_conf,
+            "naive-mpc-optim",
+            logger,
+            emhass_conf,
+        )
+        return optim_conf_out
+
+    async def test_heat_topology_merge_replaces_stale_tank_transfers(self):
+        """tank_transfers is compiler output like shared_thermal_tanks, so a
+        re-treated optim_conf must carry the CURRENT topology's transfers: replace
+        mode kept a stale value, extend mode appended to it."""
+        stale = [
+            {"from": "old", "to": "gone", "transfer_coefficient": 1.0, "max_transfer_power": 1}
+        ]
+        base = {
+            "sources": [
+                {"id": "hp", "type": "heatpump", "nominal_power": 3000, "supply_temperature": 45}
+            ],
+            "storage": [
+                {"id": "buffer", "volume": 0.1, "start_temperature": 40.0},
+                {"id": "house", "thermal_mass": 18.0, "start_temperature": 20.0},
+            ],
+            "flows": [{"from": "hp", "to": "buffer"}],
+        }
+        out = await self._treat_with_optim_conf({"heat_topology": base, "tank_transfers": stale})
+        self.assertEqual(out.get("tank_transfers") or [], [], "replace mode kept stale transfers")
+
+        extend = dict(base)
+        extend["extend_deferrable_loads"] = True
+        extend["flows"] = base["flows"] + [
+            {
+                "from": "buffer",
+                "to": "house",
+                "transfer_coefficient": 0.7,
+                "max_transfer_power": 8000,
+            }
+        ]
+        out = await self._treat_with_optim_conf({"heat_topology": extend, "tank_transfers": stale})
+        pairs = [(tr["from"], tr["to"]) for tr in out.get("tank_transfers") or []]
+        self.assertEqual(
+            pairs, [("buffer", "house")], "extend mode must not append to stale transfers"
+        )
+
     async def test_compile_heat_topology_passes_prior_heat_through(self):
         """prior_heat is a per-step list, so the compiler must pass it through
         unconverted (the sibling zone keys are coerced to scalar floats)."""

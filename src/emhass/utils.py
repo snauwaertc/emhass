@@ -610,6 +610,14 @@ def compile_heat_topology(topology: dict) -> dict:
         raise ValueError("heat_topology.sources contains duplicate ids")
     if len(sto_by_id) != len(storage):
         raise ValueError("heat_topology.storage contains duplicate ids")
+    # Flows resolve `from` against sources first, so an id shared by a source and a
+    # storage would silently turn a tank->tank transfer into a source load.
+    shared_ids = sorted(set(src_by_id) & set(sto_by_id))
+    if shared_ids:
+        raise ValueError(
+            f"heat_topology: ids used by both a source and a storage: {shared_ids}; "
+            "source and storage ids must be distinct"
+        )
 
     # Split flows: source->storage flows become deferrable loads; storage->storage
     # flows are tank->tank heat transfers (e.g. a buffer feeding a room through the
@@ -742,6 +750,10 @@ def compile_heat_topology(topology: dict) -> dict:
                 )
             source_block["carnot_efficiency"] = float(src.get("carnot_efficiency", 0.4))
         elif src_type in {"gas", "oil", "district", "constant_efficiency", "electric"}:
+            if src.get("efficiency") is None:
+                raise ValueError(
+                    f"heat_topology.sources[{src['id']}] (type={src_type}) requires 'efficiency'"
+                )
             source_block["efficiency"] = float(src["efficiency"])
         else:
             raise ValueError(
@@ -831,6 +843,11 @@ def compile_heat_topology(topology: dict) -> dict:
             storage_demand[target] = {"profile": None, "building": None, "pool": None}
         ctype = (c.get("type") or "").lower()
         if ctype == "profile":
+            if c.get("profile") is None:
+                raise ValueError(
+                    f"heat_topology.consumers[{c.get('id', target)}] (type=profile) "
+                    "requires 'profile'"
+                )
             prof = list(c["profile"])
             existing = storage_demand[target]["profile"]
             if existing is None:
@@ -1122,11 +1139,9 @@ def _extend_optim_conf_with_compiled_topology(
     optim_conf["deferrable_load_groups"] = (
         list(optim_conf.get("deferrable_load_groups") or []) + shifted_groups
     )
-    # Tank->tank transfers key on storage ids (not load indices), so they need no
-    # index shift - append the compiled ones to any existing transfers.
-    optim_conf["tank_transfers"] = list(optim_conf.get("tank_transfers") or []) + list(
-        compiled.get("tank_transfers") or []
-    )
+    # Tank->tank transfers are compiler output only (no user-facing setting), so any
+    # existing value is a previous compile's: replace it rather than append.
+    optim_conf["tank_transfers"] = list(compiled.get("tank_transfers") or [])
 
     optim_conf["number_of_deferrable_loads"] = offset + num_compiled
     logger.info(
@@ -2710,6 +2725,7 @@ async def treat_runtimeparams(
                         "number_of_deferrable_loads",
                         "def_load_config",
                         "shared_thermal_tanks",
+                        "tank_transfers",
                         "deferrable_load_groups",
                         "nominal_power_of_deferrable_loads",
                         "minimum_power_of_deferrable_loads",
