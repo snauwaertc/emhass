@@ -163,9 +163,11 @@ limits.
 > abandoned - the on/off equality can't run below nominal.)
 >
 > **Caveat:** a nonzero `min_power` with a tight `max_thermal_power` on a variable-COP
-> source can be infeasible on a mild day - if `cop * min_power` exceeds
-> `max_thermal_power` at some step the source cannot run there, surfacing as an infeasible
-> solver status.
+> source cannot run at steps where `cop * min_power` exceeds `max_thermal_power` (typically
+> a mild day). The solve still succeeds: those steps are forced off, other sources cover
+> the demand where they can, and a warning names the source and the number of affected
+> steps. If the source then has to be dropped for most of the horizon, lower `min_power`
+> only if the unit really modulates that low.
 
 ### `storage`
 
