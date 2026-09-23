@@ -6720,6 +6720,106 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             (buffer >= house - 0.1).all(), "transfer must respect the temperature gradient"
         )
 
+    def _configure_buffer_feeds_room(self):
+        """Buffer (HP + boiler) feeding a transfer-only room: the smallest shared-tank
+        config that owns a tank->tank transfer variable."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [2.0] * 48
+        self.optim_conf["number_of_deferrable_loads"] = 2
+        self.optim_conf["nominal_power_of_deferrable_loads"] = [3000, 24000]
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [0, 0]
+        self.optim_conf["operating_hours_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False, False]
+        self.optim_conf["set_deferrable_load_single_constant"] = [False, False]
+        self.optim_conf["set_deferrable_startup_penalty"] = [0.0, 0.0]
+        self.optim_conf["set_deferrable_max_startups"] = [0, 0]
+        self.optim_conf["start_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["end_timesteps_of_each_deferrable_load"] = [0, 0]
+        self.optim_conf["def_load_config"] = [
+            {"thermal_source": {"supply_temperature": 45.0, "carnot_efficiency": 0.45}},
+            {"thermal_source": {"efficiency": 0.95}},
+        ]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "buffer",
+                "load_ids": [0, 1],
+                "volume": 0.1,
+                "start_temperature": 40.0,
+                "thermal_loss": 0.05,
+                "min_temperatures": [25.0] * 48,
+                "max_temperatures": [45.0] * 48,
+            },
+            {
+                "id": "house",
+                "load_ids": [],
+                "thermal_mass": 18.0,
+                "loss_coefficient": 0.5,
+                "start_temperature": 20.5,
+                "min_temperatures": [19.5] * 48,
+                "max_temperatures": [21.5] * 48,
+            },
+        ]
+        self.optim_conf["tank_transfers"] = [
+            {
+                "from": "buffer",
+                "to": "house",
+                "transfer_coefficient": 0.7,
+                "max_transfer_power": 12000,
+            }
+        ]
+        return self.create_optimization()
+
+    def _solve_default_inputs(self, opt):
+        return opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+
+    def test_relaxed_rescue_restores_transfer_vars(self):
+        """The relaxed-LP rescue rebuilds the constraints, which creates new tank
+        transfer variables and rebinds self.transfer_vars to them. The #1048 restore
+        block put the other instance hooks back but not this one, so after a single
+        rescue every later solve on the same instance published P_transfer_* from
+        variables that belong to the discarded relaxed problem - a frozen pump
+        schedule at Optimal. After the rescue the hook must point at the cached
+        problem's own variables again."""
+        opt = self._configure_buffer_feeds_room()
+        opt._needs_relaxed_retry = lambda *a, **k: True  # force the rescue once
+        self._solve_default_inputs(opt)
+        cached_ids = {id(v) for v in opt.prob.variables()}
+        self.assertTrue(opt.transfer_vars, "fixture must own a transfer variable")
+        for key, var in opt.transfer_vars.items():
+            self.assertIn(
+                id(var),
+                cached_ids,
+                f"transfer_vars[{key}] still points at the relaxed problem's variable",
+            )
+
+    def test_solver_exception_does_not_republish_previous_plan(self):
+        """cvxpy leaves a problem's status and value untouched when solve() raises,
+        so on an instance that already solved once, an exception on the next run
+        left status 'optimal' from the PREVIOUS run in place: the rescue was skipped
+        and the old plan was published again as Optimal. An exception must be
+        treated as a failed solve and go through the rescue."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        opt = self.create_optimization()
+        self._solve_default_inputs(opt)
+        self.assertEqual(opt.optim_status, "Optimal")
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("simulated solver crash")
+
+        opt.prob.solve = boom
+        self._solve_default_inputs(opt)
+        self.assertNotEqual(
+            opt.optim_status,
+            "Optimal",
+            "a crashed solve must not publish the previous run's status",
+        )
+
     def test_tank_transfer_missing_endpoint_forces_zero_and_warns(self):
         """Bug A regression: a tank_transfers entry whose endpoint id has no shared
         tank (so no temperature variable exists) must be forced to zero with a

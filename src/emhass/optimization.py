@@ -7117,6 +7117,10 @@ class Optimization:
             self.logger.warning(
                 f"Solver {selected_solver} failed: {e}. Checking status for fallback..."
             )
+            # cvxpy leaves status and value from the PREVIOUS solve in place when
+            # solve() raises, so a reused problem would republish the old plan as
+            # Optimal. Mark the attempt as failed so the rescue path runs.
+            self.prob._status = None
 
         # DP COP refinement. Self-triggering - corrects and re-solves only the
         # heat-pump tanks whose COP the static solve got wrong; a no-op when every
@@ -7172,6 +7176,7 @@ class Optimization:
                 for k, params in self.param_thermal.items()
                 if "q_input_var" in params
             }
+            original_transfer_vars = getattr(self, "transfer_vars", {})
 
             # Relax Configuration: Disable Binary Logic
             n_def = self.optim_conf["number_of_deferrable_loads"]
@@ -7256,6 +7261,7 @@ class Optimization:
             # Restore the instance-held references the rebuild replaced, so the
             # next run reads the cached problem's own objects (issue #1048).
             self.vars.update(original_hybrid_vars)
+            self.transfer_vars = original_transfer_vars
             for k, params in self.param_thermal.items():
                 if k in original_q_input_vars:
                     params["q_input_var"] = original_q_input_vars[k]
