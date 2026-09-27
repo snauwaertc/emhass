@@ -14580,7 +14580,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         # whether this particular re-solve happened to be accepted.
         accepted = {}
 
-        def always_accept(status, value):
+        def always_accept(*_args):
             accepted["called"] = True
             return True
 
