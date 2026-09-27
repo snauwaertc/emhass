@@ -109,6 +109,16 @@ lp_solver_mip_rel_gap: 0.05  # Stop when within 5% of optimal
 | 0.10 | Within 10% of optimal | Fast solving, good for testing |
 | 0.20 | Within 20% of optimal | Very fast, adequate for simple decisions |
 
+### Heat-pump COP refinement
+
+`cop_solver` controls the optional dynamic-programming COP refinement for
+shared thermal tanks fed by a curve-driven heat pump. `static` (the default)
+keeps the constant heating-curve COP and never re-solves. `auto` adds a
+post-solve refinement and, when it finds an inconsistency, a second
+(warm-started, half-budget) MILP solve: better plans on thermal-heavy setups,
+at the cost of extra wall-clock on every run where it triggers. `dp` always runs
+it. See [the heat topology docs](heat_topology.md) for when it matters.
+
 **Benchmarks show:**
 - 5% gap: ~1.75x speedup
 - 10% gap: ~1.86x speedup
