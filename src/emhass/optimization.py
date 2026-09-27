@@ -4368,8 +4368,10 @@ class Optimization:
         # the window; the desired-temperature penalty still pulls it up as fast as it can.
         floor0 = next((v for v in min_temperatures_list if v is not None), None)
         if floor0 is not None and start_temperature < floor0 - 1e-6:
-            window = max(SHARED_TANK_START_RECOVERY_STEPS,
-                         int(np.ceil((floor0 - start_temperature) / SHARED_TANK_START_RECOVERY_RATE)))
+            window = max(
+                SHARED_TANK_START_RECOVERY_STEPS,
+                int(np.ceil((floor0 - start_temperature) / SHARED_TANK_START_RECOVERY_RATE)),
+            )
             min_temperatures_list = list(min_temperatures_list)
             for t in range(min(window, len(min_temperatures_list))):
                 cfg = min_temperatures_list[t]
@@ -4380,7 +4382,10 @@ class Optimization:
             self.logger.info(
                 "Shared tank '%s': start %.1f C below floor %.1f C - ramping the min "
                 "back into band over %d steps to stay feasible",
-                tank_id, start_temperature, floor0, window,
+                tank_id,
+                start_temperature,
+                floor0,
+                window,
             )
 
         # Hard min/max temperature bounds (shared helper; index 0 already pinned).

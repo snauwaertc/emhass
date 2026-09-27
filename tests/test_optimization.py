@@ -13310,9 +13310,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(temp.iloc[0], start, places=1)
         # Early on the tank is still recovering - it was NOT forced to the
         # configured floor instantly (which would have been infeasible).
-        self.assertLess(
-            temp.iloc[2], floor, "Tank must recover gradually, not jump to the floor"
-        )
+        self.assertLess(temp.iloc[2], floor, "Tank must recover gradually, not jump to the floor")
         # window = max(6, ceil((45-35)/0.5)) = 20 steps; once it closes the
         # configured floor is fully in force for the rest of the horizon.
         window = 20
