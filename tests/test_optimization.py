@@ -10,6 +10,7 @@ from datetime import datetime
 from unittest import mock
 
 import aiofiles
+import cvxpy as cp
 import numpy as np
 import orjson
 import pandas as pd
@@ -13231,15 +13232,28 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
 
     def test_relaxed_rescue_restores_transfer_vars(self):
         """The relaxed-LP rescue rebuilds the constraints, which creates new tank
-        transfer variables and rebinds self.transfer_vars to them. The #1048 restore
-        block put the other instance hooks back but not this one, so after a single
-        rescue every later solve on the same instance published P_transfer_* from
-        variables that belong to the discarded relaxed problem - a frozen pump
-        schedule at Optimal. After the rescue the hook must point at the cached
-        problem's own variables again."""
+        transfer variables and rebinds self.transfer_vars to them.
+
+        - The rescued run must publish P_transfer_* from the relaxed problem it
+          actually solved (the room only gets heat from the buffer, so the
+          transfer cannot be zero).
+        - Afterwards the hook must point at the cached problem's own variables
+          again (#1048), or every later solve on the same instance would publish
+          a frozen pump schedule."""
         opt = self._configure_buffer_feeds_room()
-        opt._needs_relaxed_retry = lambda *a, **k: True  # force the rescue once
-        self._solve_default_inputs(opt)
+        original_solve = cp.Problem.solve
+        calls = {"n": 0}
+
+        def fail_first_solve(problem, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise cp.error.SolverError("simulated failure to force the rescue")
+            return original_solve(problem, *args, **kwargs)
+
+        with mock.patch.object(cp.Problem, "solve", fail_first_solve):
+            res = self._solve_default_inputs(opt)
+        self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
+        self.assertGreater(res["P_transfer_buffer_house"].max(), 0.0)
         cached_ids = {id(v) for v in opt.prob.variables()}
         self.assertTrue(opt.transfer_vars, "fixture must own a transfer variable")
         for key, var in opt.transfer_vars.items():

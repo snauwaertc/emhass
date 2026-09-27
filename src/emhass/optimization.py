@@ -5224,6 +5224,7 @@ class Optimization:
         heating_demands,
         debug,
         q_inputs=None,
+        transfer_vars=None,
     ):
         """Build the final results DataFrame (Vectorized extraction)."""
         opt_tp = pd.DataFrame(index=data_opt.index)
@@ -5260,7 +5261,9 @@ class Optimization:
 
         # Tank-to-tank transfers (modulated pump flows): one additive column per
         # flow, in W to match the other power columns - the actionable pump schedule.
-        for (frm, to), q_var in getattr(self, "transfer_vars", {}).items():
+        if transfer_vars is None:
+            transfer_vars = getattr(self, "transfer_vars", {})
+        for (frm, to), q_var in transfer_vars.items():
             opt_tp[f"P_transfer_{frm}_{to}"] = get_val(q_var) * 1000.0  # kW -> W
 
         # Battery Results (#610). This independently recomputes the SOC/P_batt
@@ -6540,6 +6543,10 @@ class Optimization:
         # intact for the next run (issue #1048: caching prob_relaxed made the
         # stress-free, binary-relaxed rescue permanent).
         solved_prob = self.prob
+        # Transfer variables of the problem whose values are published; the
+        # relaxed rescue builds its own and the restore below points
+        # self.transfer_vars back at the cached problem's.
+        solved_transfer_vars = getattr(self, "transfer_vars", {})
 
         # Check for failure or "bad" status
         # Note: "user_limit" often means timeout. "infeasible" means configuration conflict.
@@ -6649,6 +6656,7 @@ class Optimization:
                 # pointing at the clean cached problem: the relaxed solve is a
                 # one-shot rescue, never a permanent replacement (issue #1048).
                 solved_prob = prob_relaxed
+                solved_transfer_vars = self.transfer_vars
             except Exception as e:
                 self.logger.error(f"Relaxed optimization crashed: {e}")
 
@@ -6718,6 +6726,7 @@ class Optimization:
             heating_demands,
             debug,
             q_inputs=q_inputs,
+            transfer_vars=solved_transfer_vars,
         )
         if stage_times is not None:
             stage_times["optim_solve.extract"] = time.perf_counter() - _extract_start_perf
