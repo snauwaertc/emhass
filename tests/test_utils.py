@@ -5212,9 +5212,10 @@ class TestCompileHeatTopology(unittest.TestCase):
         self.assertIn("id", str(ctx.exception))
 
     def test_max_thermal_power_rejects_non_positive(self):
-        """A non-positive max_thermal_power is rejected: a zero/negative ceiling
-        would permanently disable the source."""
-        for bad in (0, -100):
+        """A non-positive, non-finite or non-numeric max_thermal_power is rejected:
+        a zero/negative ceiling would permanently disable the source, and NaN, inf
+        or a boolean is not a power."""
+        for bad in (0, -100, float("nan"), float("inf"), True, "15000"):
             topo = {
                 "sources": [
                     {

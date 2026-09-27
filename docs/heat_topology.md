@@ -144,7 +144,8 @@ real unit at its thermal ceiling runs flat-out against whichever limit binds.
 The COP refinement (`cop_solver`) respects the cap as well.
 
 A nonzero `min_power` with a tight `max_thermal_power` on a variable-COP source
-cannot run at steps where `COP * min_power` exceeds `max_thermal_power`
+(semi-continuous or continuous) cannot run at steps where `COP * min_power`
+exceeds `max_thermal_power`
 (typically mild days). The solve still succeeds: those steps are off, other
 sources cover the demand where they can, and a warning names the source and the
 number of affected steps. Lower `min_power` only if the unit really modulates

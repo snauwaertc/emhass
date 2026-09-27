@@ -14966,7 +14966,9 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             "ON-state delivered heat must respect max_thermal_power",
         )
 
-    def _run_hp_curve_soft_comfort(self, max_thermal_power, min_power=None, cop_solver="static"):
+    def _run_hp_curve_soft_comfort(
+        self, max_thermal_power, min_power=None, cop_solver="static", semi_cont=None
+    ):
         """A heating_curve HP (Parameter COP) feeding a tank with a SOFT comfort
         target (desired_temperature). Warm 20 C outdoor -> curve supply 28 C ->
         COP clamps to 8, so the cap (if set) binds. Cheap flat price. The HP
@@ -14985,6 +14987,8 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             hp["max_thermal_power"] = max_thermal_power
         if min_power is not None:
             hp["min_power"] = min_power
+        if semi_cont is not None:
+            hp["treat_as_semi_cont"] = semi_cont
         topo = {
             "sources": [hp],
             "storage": [
@@ -15156,22 +15160,49 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(res["P_deferrable0"].sum(), 0.0, places=3)
         self.assertAlmostEqual(res["P_deferrable0"].max(), 0.0, places=3)
 
-    def test_min_power_collision_warned_after_dp_refinement(self):
-        """The DP COP refinement re-derives a capped semi-continuous source's ON
-        level from the refined COP, and a refined COP can push cap/COP below
-        min_power at steps the static solve did not flag. The build-time collision
-        warning must therefore also be raised where the DP lowers the level, or
-        those steps are dropped silently in the re-solve."""
+    def test_min_power_collision_warns_for_continuous_source(self):
+        """A continuous capped source collides the same way: cop * p <= cap and
+        p >= min_power * bin leave OFF as the only feasible state where
+        cap/COP < min_power. That must warn too, not only for semi-continuous
+        sources."""
+        with self.assertLogs(level="WARNING") as logs:
+            opt, res = self._run_hp_curve_soft_comfort(
+                max_thermal_power=15000, min_power=2000, semi_cont=False
+            )
+        matching = [m for m in logs.output if "load 0" in m and "min_power" in m]
+        self.assertEqual(len(matching), 1, logs.output)
+        self.assertAlmostEqual(res["P_deferrable0"].sum(), 0.0, places=3)
+
+    def test_min_power_collision_not_repeated_after_dp_refinement(self):
+        """The DP refinement re-derives the ON level from the refined COP and checks
+        the collision again. When the number of affected steps is unchanged (here
+        the COP clamps to 8 before and after), the build-time warning is not
+        repeated on every run."""
         with self.assertLogs(level="WARNING") as logs:
             self._run_hp_curve_soft_comfort(
                 max_thermal_power=15000, min_power=2000, cop_solver="dp"
             )
-        dp_warnings = [
-            m
-            for m in logs.output
-            if "min_power" in m and "DP COP refinement" in m and "load 0" in m
-        ]
-        self.assertTrue(dp_warnings, f"no collision warning from the DP re-solve: {logs.output}")
+        matching = [m for m in logs.output if "min_power" in m and "load 0" in m]
+        self.assertEqual(len(matching), 1, logs.output)
+
+    def test_min_power_collision_rewarned_when_dp_changes_it(self):
+        """After the DP, a changed number of affected steps is warned again, naming
+        the refinement."""
+        opt = self.create_optimization()
+        self.optim_conf["minimum_power_of_deferrable_loads"] = [2000]
+        opt.optim_conf["minimum_power_of_deferrable_loads"] = [2000]
+        cop = np.full(4, 8.0)  # cap/COP = 1875 W < 2000 W at every step
+        with self.assertLogs(level="WARNING") as logs:
+            self.assertEqual(opt._warn_capped_level_below_min_power("t", 0, cop, 15000, 4), 4)
+        self.assertEqual(len(logs.output), 1)
+        with self.assertNoLogs(level="WARNING"):
+            opt._warn_capped_level_below_min_power("t", 0, cop, 15000, 4, after_dp=True)
+        cop[:2] = 5.0  # cap/COP = 3000 W at two steps: only two collide now
+        with self.assertLogs(level="WARNING") as logs:
+            self.assertEqual(
+                opt._warn_capped_level_below_min_power("t", 0, cop, 15000, 4, after_dp=True), 2
+            )
+        self.assertIn("after the DP COP refinement", logs.output[0])
 
 
 if __name__ == "__main__":

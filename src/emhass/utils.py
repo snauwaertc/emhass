@@ -852,8 +852,13 @@ def compile_heat_topology(topology: dict) -> dict:
         # temperature.
         _thermal_cap = src.get("max_thermal_power")
         if _thermal_cap is not None:
+            if isinstance(_thermal_cap, bool) or not isinstance(_thermal_cap, int | float):
+                raise ValueError(
+                    f"heat_topology.sources[{src['id']}].max_thermal_power must be a "
+                    f"number of W, got {_thermal_cap!r}"
+                )
             thermal_cap_value = float(_thermal_cap)
-            if thermal_cap_value <= 0:
+            if not np.isfinite(thermal_cap_value) or thermal_cap_value <= 0:
                 raise ValueError(
                     f"heat_topology.sources[{src['id']}].max_thermal_power "
                     "must be > 0 W; a non-positive ceiling permanently disables "

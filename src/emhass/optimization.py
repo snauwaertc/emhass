@@ -4076,18 +4076,25 @@ class Optimization:
     def _warn_capped_level_below_min_power(
         self, tank_id, k, cop_vals, thermal_cap, n_steps, after_dp=False
     ):
-        """Warn when a capped semi-continuous source cannot run at some steps.
+        """Warn when a capped source cannot run at some steps.
 
-        Its ON level is min(nominal, cap/COP), and `p == on_level * bin` and
-        `p >= min_power * bin` share a binary, so where cap/COP < min_power OFF is
-        the only feasible state and the source is dropped. That is physically
-        right (the unit cannot modulate below its floor), but it must not happen
-        silently: warn rather than lower the floor.
+        Where cap/COP < min_power, `cop * p <= cap` and `p >= min_power * bin` leave
+        OFF as the only feasible state, whether the source is semi-continuous (its
+        ON level is min(nominal, cap/COP)) or continuous, so the source is dropped
+        at those steps. That is physically right (the unit cannot modulate below
+        its floor), but it must not happen silently: warn rather than lower the
+        floor. After the DP refinement the warning is repeated only when the
+        number of affected steps changed. Returns that number.
         """
         cap_over_cop = float(thermal_cap) / np.maximum(np.asarray(cop_vals, dtype=float), 1e-9)
-        min_power_k = self.optim_conf["minimum_power_of_deferrable_loads"][k]
-        below_min = int(np.count_nonzero(cap_over_cop < min_power_k))
-        if min_power_k > 0 and below_min > 0:
+        min_powers = self.optim_conf.get("minimum_power_of_deferrable_loads") or []
+        min_power_k = float(min_powers[k]) if k < len(min_powers) and min_powers[k] else 0.0
+        below_min = int(np.count_nonzero(cap_over_cop < min_power_k)) if min_power_k > 0 else 0
+        counts = self.__dict__.setdefault("_capped_below_min_counts", {})
+        if after_dp and counts.get(k) == below_min:
+            return below_min
+        counts[k] = below_min
+        if below_min > 0:
             self.logger.warning(
                 "Shared tank '%s': load %s cannot run at %s/%s steps%s; its "
                 "min_power (%s W) exceeds the level max_thermal_power allows "
@@ -4099,6 +4106,7 @@ class Optimization:
                 " after the DP COP refinement" if after_dp else "",
                 min_power_k,
             )
+        return below_min
 
     def _add_shared_thermal_tank_constraints(
         self, constraints, tank_idx, data_opt, p_load, transfer_vars=None
@@ -4620,14 +4628,12 @@ class Optimization:
             # Lower the ON level to min(nominal, cap/COP) per step - the unit
             # runs flat-out against whichever limit binds.
             on_level = getattr(self, "_semi_cont_on_level", {}).get(k)
+            cop_vals = np.asarray(cops.value if hasattr(cops, "value") else cops, dtype=float)
             if on_level is not None:
-                cop_vals = np.asarray(cops.value if hasattr(cops, "value") else cops, dtype=float)
                 on_level.value = np.minimum(
                     on_level.value, float(thermal_cap) / np.maximum(cop_vals, 1e-9)
                 )
-                self._warn_capped_level_below_min_power(
-                    tank_id, k, cop_vals, thermal_cap, required_len
-                )
+            self._warn_capped_level_below_min_power(tank_id, k, cop_vals, thermal_cap, required_len)
 
         # Soft comfort constraints (issue #539): the tank's desired_temperatures
         # set a comfort target whose shortfall is penalized in the objective
@@ -5121,18 +5127,23 @@ class Optimization:
                 # ON state to a power the (new) thermal cap no longer allows.
                 cap_w = hp.get("max_thermal_power")
                 on_level = getattr(self, "_semi_cont_on_level", {}).get(hp["load_idx"])
-                if cap_w and on_level is not None:
-                    base = np.broadcast_to(
-                        np.asarray(
-                            self.optim_conf["nominal_power_of_deferrable_loads"][hp["load_idx"]],
-                            dtype=float,
-                        ),
-                        on_level.shape,
-                    )
-                    new_cop = np.asarray(hp["cop_param"].value, dtype=float)[: on_level.size]
-                    on_level.value = np.minimum(base, float(cap_w) / np.maximum(new_cop, 1e-9))
+                if cap_w:
+                    new_cop = np.asarray(hp["cop_param"].value, dtype=float)[:n]
+                    if on_level is not None:
+                        base = np.broadcast_to(
+                            np.asarray(
+                                self.optim_conf["nominal_power_of_deferrable_loads"][
+                                    hp["load_idx"]
+                                ],
+                                dtype=float,
+                            ),
+                            on_level.shape,
+                        )
+                        on_level.value = np.minimum(
+                            base, float(cap_w) / np.maximum(new_cop[: on_level.size], 1e-9)
+                        )
                     self._warn_capped_level_below_min_power(
-                        e["tank_id"], hp["load_idx"], new_cop, cap_w, on_level.size, after_dp=True
+                        e["tank_id"], hp["load_idx"], new_cop, cap_w, n, after_dp=True
                     )
                 # Bound the re-solve to the temperatures the refined COP is valid for.
                 # The COP of step t is set at the DP's end-of-step temperature, so the
