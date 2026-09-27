@@ -4322,7 +4322,10 @@ class Optimization:
             is_hp = src_cfg.get("efficiency") is None and bool(
                 src_cfg.get("heating_curve") or src_cfg.get("cooling_curve")
             )
-            if is_hp and dp_hp_info is None:
+            # With cop_solver 'static' the refinement never runs, so the COP stays a
+            # constant array and the problem is exactly the one without this feature.
+            refinable = is_hp and self._cop_solver != "static"
+            if refinable and dp_hp_info is None:
                 cop_param = cp.Parameter(
                     required_len, nonneg=True, value=cops, name=f"cop_{tank_id}_{k}"
                 )
@@ -4342,7 +4345,7 @@ class Optimization:
                     ),
                 }
             else:
-                if is_hp:
+                if refinable:
                     # A second curve-driven heat pump on the same tank: only the
                     # first is DP-refined (one COP Parameter per tank), so this one
                     # keeps its pre-solve static COP. Say so - a silently mispriced

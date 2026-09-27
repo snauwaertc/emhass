@@ -14063,6 +14063,15 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.optim_conf["cop_solver"] = " Auto "
         self.assertEqual(self.create_optimization()._cop_solver, "auto")
 
+    def test_static_cop_solver_keeps_cop_constant(self):
+        """With cop_solver 'static' (the default) the DP never runs, so the heat
+        pump's COP must stay a constant array: the problem is then exactly the one
+        built without the refinement feature. Other modes hold it as a Parameter."""
+        for solver, expect_param in (("static", False), ("auto", True)):
+            opt, _, _ = self._dp_refine_scenario(solver)
+            names = [param.name() for param in opt.prob.parameters()]
+            self.assertEqual(any(n.startswith("cop_buffer") for n in names), expect_param, solver)
+
     def test_dp_cop_refinement_noop_when_consistent(self):
         """When the static COP is already consistent with the tank temperatures the
         plan reaches, auto mode must not run the DP and must return the static plan.
