@@ -1,4 +1,4 @@
-**Title:** thermal_inertia: truncate or round the lag to whole timesteps?
+**Title:** thermal_inertia: should the lag round to the nearest timestep instead of truncating?
 
 **Describe the bug**
 Not a bug yet, a convention question before it becomes one.
@@ -9,12 +9,11 @@ ratio with a fractional part, the lag is shorter than configured: `0.75` h at a
 30-minute step is 1.5 steps and becomes a 1-step lag, so heat reaches the
 modelled temperature one step earlier than the user asked for.
 
-I am preparing a PR that adds `thermal_inertia` to shared thermal tanks
-(heat_topology storage). That implementation rounds to the nearest step, so
-`0.75` h would be a 2-step lag there. The same config value would then mean two
-different models depending on whether the load is a `thermal_config` or a
-shared-tank member. I would like both paths to use one convention before that
-lands.
+A PR in preparation (<link to PR 4>) adds `thermal_inertia` to shared thermal
+tanks (heat_topology storage). To avoid two conventions it follows the same
+truncation. I would still like to ask whether truncation is the intended rule,
+because it makes the modelled delay shorter than configured, and changing it
+later would change plans for both paths at once.
 
 **To Reproduce**
 1. Configure a `thermal_config` load with `"thermal_inertia": 0.75` and the
@@ -33,10 +32,11 @@ One documented convention for both paths. The options:
   ratios with a fractional part >= 0.5 (e.g. 0.75 h or 1.25 h at a 30-minute
   step). Exact multiples, like every value in the docs and tests (1.0 h at
   30 min), are unaffected.
-- **Truncate** (current per-load behaviour): no change for existing users;
-  the shared-tank path would truncate too.
+- **Truncate** (current behaviour, also used by the shared-tank path in
+  <link to PR 4>): no change for existing users.
 
-Either way, the docs (`thermal_model.md`) would state the rule explicitly.
+<link to PR 1> documents the current rule in `thermal_model.md`; if you prefer
+rounding, I will change both paths and the docs in one PR.
 The crash for a lag at or beyond the horizon is fixed separately in
 <link to PR 1> and does not depend on this choice.
 
