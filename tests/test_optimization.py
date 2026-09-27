@@ -13352,6 +13352,23 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(opt.optim_status, ("Optimal", "Optimal (Relaxed)"))
 
+    def test_shared_tank_null_floor_entries_do_not_break_the_solve(self):
+        """A shared tank whose min_temperatures has null entries (unbounded at those
+        steps) must still solve: the nulls resolve to None and the hard-bound builder
+        skips them. Before the nan guard, np.asarray turned each null into a nan that
+        slipped past the `is not None` filter and entered the LP as `>= nan`."""
+        min_t = [45.0] * 48
+        for i in (5, 6, 7, 20, 21):
+            min_t[i] = None  # unbounded at these steps
+        opt, res = self._run_soft_tank(tank_extra={"min_temperatures": min_t})
+        self.assertEqual(opt.optim_status, "Optimal")
+        tank_cols = [c for c in res.columns if "predicted_temp_heater" in c]
+        self.assertTrue(tank_cols)
+        temp = res[tank_cols[0]].reset_index(drop=True)
+        # The bounded steps still hold their 45 C floor; only the null steps are free.
+        bounded = [i for i in range(1, 48) if min_t[i] is not None]
+        self.assertGreaterEqual(temp.iloc[bounded].min(), 45.0 - 0.2)
+
 
 if __name__ == "__main__":
     unittest.main()
