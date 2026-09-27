@@ -7,11 +7,12 @@ example to bank surplus PV into a buffer, the MILP super-heats at an
 optimistic COP the real condenser cannot achieve. This PR adds an exact
 dynamic-programming (DP) refinement that checks the plan against the true
 temperature-dependent COP and, only when they disagree, re-solves with the
-corrected COP and a ceiling at the DP-optimal peak.
+corrected COP and a temperature ceiling derived from the DP's peak.
 
-**It is off by default.** `cop_solver` defaults to `static`, which keeps the
-current behaviour exactly and never re-solves. `auto` engages the DP only when
-the static solve is COP-inconsistent; `dp` always runs it.
+**It is off by default.** `cop_solver` defaults to `static`, which never runs
+the DP or re-solves. `auto` engages the DP only when the static solve is
+COP-inconsistent; `dp` always runs it. An unknown value warns and falls back to
+`static`.
 Stacked on <link to PR 4>; the diff below is only this PR's.
 
 ### What it adds
@@ -20,13 +21,15 @@ Stacked on <link to PR 4>; the diff below is only this PR's.
   optionally with a coupled second store (e.g. buffer + pool), with per-step
   COP (`COP[t, T]`), a marginal price that drops to the export price during PV
   surplus, a bounded state count, and a cooling mode.
-- `Optimization._refine_cop_with_dp`: consistency check, DP, and a
-  warm-started re-solve with half the time budget. A re-solve that the main
+- `Optimization._refine_cop_with_dp`: consistency check, DP, and a re-solve
+  with half of the solver's time limit (HiGHS, Gurobi or CPLEX). A re-solve that the main
   path's own acceptance rule would reject keeps the static plan. The refined
   problem is handed to the result extraction without replacing the cached
   problem (#1048), and the DP registry is restored after a relaxed rescue.
 - Cooling: a heat-pump source with a `cooling_curve` feeding a `cool` storage
-  compiles through `heat_topology`, and the DP refines it in cooling mode.
+  compiles through `heat_topology`, and the DP refines it in cooling mode. A
+  cooling source configured with `heating_curve` (the only curve key before)
+  keeps working.
 - Parameters (four-step workflow: `associations.csv`, `config_defaults.json`,
   `param_definitions.json`, part of the cache key's structural hash):
   `cop_solver` (`static` | `auto` | `dp`, default `static`),
@@ -39,6 +42,25 @@ predicate, `_needs_relaxed_retry` (infeasible, unbounded, time-limited, no
 status, or no value). The main path's behaviour is unchanged: it calls the
 predicate instead of an inline list.
 
+### What `static` changes, and known limits
+
+- With `static`, the problem is exactly the one built without this feature:
+  the heat pump's COP is only held as a `cp.Parameter` when the refinement can
+  run.
+- The DP models the tank with one minimum and maximum over the horizon and
+  without the soft `desired_temperatures`; the re-solve enforces both.
+- The DP's runtime is not bound by the solver time limit: about 3 s for a
+  buffer + pool over 96 steps on x86, up to about 27 s at the 200-state cap.
+- A coupled store's own draw-off or pool demand is not passed to the DP; only
+  its loss coefficient is.
+- Design question: the consistency check uses the absolute COP difference, so
+  it also engages when the tank sits below the curve and the refined COP is
+  higher than the static one.
+
+The history has 34 commits, including fix-on-fix commits from review rounds.
+Squash-merging is fine; I can also squash it into four commits (DP module,
+optimizer wiring and parameters, cooling, docs) before review.
+
 ### Documentation
 
 - `heat_topology.md`: `cooling_curve`; which sources the DP refines, and when
@@ -46,7 +68,8 @@ predicate instead of an inline list.
 - `advanced_math_model.md`: a **Thermal storage and heat pumps** section (store
   dynamics, non-electric sources, why the COP is non-convex, the DP
   refinement, cooling, the `cop_solver` settings) and a section on the MIP gap
-  for long or complex problems.
+  for long or complex problems (that section is general and can move to its own
+  PR if preferred).
 - `advanced_solvers.md` and `config.md`: `cop_solver`,
   `cop_solver_tolerance`, `cop_hx_approach`.
 
@@ -62,7 +85,3 @@ configurations: byte-identical result DataFrames.
   module's own tests are new code).
 - Full suite: 1344 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on the base there. Sphinx build: no warnings on the changed pages.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-https://claude.ai/code/session_01QGQMaX47ARAZFK2bVCiJwC

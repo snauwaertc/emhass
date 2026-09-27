@@ -25,10 +25,13 @@ Stacked on <link to PR 5>; the diff below is only this PR's.
 - The ON-level registry is restored after a relaxed rescue, so a reused
   problem keeps it.
 - **Warnings instead of silent abandonment.** Where `COP * min_power` exceeds
-  the cap, `p >= min_power * bin` and the lowered ON level cannot both hold, so
-  the source is off at those steps. The solve still succeeds, and a warning now
-  names the source and the number of affected steps, both in the build and
-  where the DP re-derives the ON level.
+  the cap, the source cannot run at those steps: for a semi-continuous source
+  `p >= min_power * bin` collides with the lowered ON level, for a continuous
+  one with `COP * p <= cap`. The solve still succeeds, and a warning names the
+  source and the number of affected steps. After the DP re-derives the ON level
+  it warns again only if that number changed.
+- The compiler rejects a non-positive, NaN, infinite or non-numeric
+  `max_thermal_power`.
 
 ### Documentation
 
@@ -50,7 +53,3 @@ byte-identical result DataFrames.
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-https://claude.ai/code/session_01QGQMaX47ARAZFK2bVCiJwC

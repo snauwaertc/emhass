@@ -5,7 +5,8 @@ PR has a ready-to-paste body in this folder (`prNN-body.md`); issues have
 `issue-*.md`. Replace the `<link to ...>` placeholders with real numbers once the
 referenced PR or issue exists.
 
-Every PR was checked the same way: each commit with tests is red on its base and
+Every PR was reviewed independently afterwards; the findings and what was done
+about each are in `reviews.md`. Every PR was checked the same way: each commit with tests is red on its base and
 green with the change; the full suite passes (apart from tests that need live
 open-meteo / an untouched Solcast day counter, which fail identically on master
 in the sandbox); `ruff check` and `ruff format --check` are clean; and an A/B
@@ -19,12 +20,12 @@ against master.
 | 1 | `pr/01-thermal-bugfixes` | master | fixes to thermal / heat_topology code already on master | ready |
 | 1b | `pr/01b-relaxed-fallback-statuses` | master | `Optimal_Inaccurate` reported as ok; publish-data skips temp files | ready |
 | 2 | `pr/02-shared-tank-fixes` | 1 | shared-tank stale plans (#970), comfort columns, validation, solver-exception republish | ready |
-| 3 | `pr/03-shared-tank-extensions` | 2 | per-source limits and overshoot, combi tanks, extend mode, runtime tanks, config text box | ready |
+| 3 | `pr/03-shared-tank-extensions` | 2 | per-source limits and overshoot, combi tanks, extend mode, runtime tanks, config text box | ready (large: a 4-way split is offered in the body) |
 | 4 | `pr/04-unified-thermal-model` | 3 | building-zone storage, tank-to-tank transfers, window solar, start-below-floor ramp | ready |
 | 5 | `pr/05-dp-cop-solver` | 4 | opt-in DP COP refinement, heating and cooling (`cop_solver`, default `static`) | ready |
 | 6 | `pr/06-max-thermal-power` | 5 | `max_thermal_power` and the semi-continuous ON level | ready |
 | 7 | `pr/07-prior-heat-dead-zone` | 6 | `prior_heat` for the thermal_inertia dead zone (#1136) | after #1136 is answered |
-| 8 | `pr/08-dayahead-period-peak` | master | `current_period_peak` in dayahead-optim | design question for the maintainer |
+| 8 | `pr/08-dayahead-period-peak` | master | `current_period_peak` in dayahead-optim | design question: an issue first is safer |
 | 9 | `pr/09-relaxed-fallback` | 7 (+1b) | keep mutex in the fallback, keep time-limited incumbents, report both as ok | after `issue-relaxed-fallback.md` is answered |
 | 10 | `pr/10-thermal-onboarding-docs` | 7 | which model to use, migration guide, hybrid walkthrough (tested example) | ready once 2-7 are in |
 
@@ -41,12 +42,23 @@ Open a PR with (example for 1):
 For a stacked PR, open it after its base has merged, or open it against master
 and note in the body that it contains the base PR's commits until that merges.
 
+## Testing on real hardware
+
+`pi/train-final` merges PR 9 (which contains 1-7 and 1b), PR 10 and PR 8, plus a
+shadow-run script. See `scripts/PI_TEST.md` on that branch. It is test-only and
+never goes upstream.
+
 ## Issues to file first
 
 | File | About | Blocks |
 |---|---|---|
 | `issue-lag-rounding.md` | truncate or round `thermal_inertia` to whole steps | nothing (both paths truncate for now) |
 | `issue-relaxed-fallback.md` | mutex in the fallback, incumbents, reporting relaxed runs | PR 9 |
+
+Reviewers also suggest an issue first (AGENTS.md: visible behaviour changes in
+`optimization.py`) for PR 2's overshoot change on continuous loads, PR 3's size,
+PR 4's helper extraction and PR 8's MPC-only question. Each PR body flags
+these, so they can also be raised in the PR itself.
 
 ## What stays in the fork on purpose
 

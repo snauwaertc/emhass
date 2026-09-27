@@ -13,24 +13,31 @@ Stacked on <link to PR 3>; the diff below is only this PR's.
 |---|---|---|
 | Building-zone storage | storage `thermal_mass` (kWh/K), `loss_coefficient` (kW/K) | state-dependent loss `UA*(T - outdoor)`: a warmer zone loses more, so pre-heating on cheap power and coasting through a price peak shows up in the plan |
 | Heat-input lag on storage | storage `thermal_inertia` (h) | same whole-step convention as the per-load model (truncate), capped at the horizon; see <link to lag issue> |
-| Window solar for zones | storage `window_area`, `shgc` | gain `window_area * shgc * GHI` from the forecast already fetched for PV |
+| Window solar for zones | storage `window_area`, `shgc` | gain `window_area * shgc * GHI` from the forecast already fetched for PV; applies to a zone with `loss_coefficient` and needs GHI in the weather data |
 | Tank-to-tank transfers | storage-to-storage `flows` with `transfer_coefficient` (kW/K), `max_transfer_power` (W) | hot-to-cold only, at most `k * (T_from - T_to)`; zero when the receiver is as warm or warmer |
 | Pump schedule | result columns `P_transfer_{from}_{to}` (W) | additive columns in the result CSV and `/api/v1/plan`; not published as HA sensors |
-| Start below the floor | - | a storage that starts below a minimum it must meet soon (including a setback floor that rises a few steps later) gets a recovery ramp (at most 0.5 C per step, over at least 6 steps) instead of an infeasible problem |
+| Start below the floor | - | a storage that starts below a minimum it must meet soon (including a setback floor that rises a few steps later) gets a soft floor over a recovery window instead of an infeasible problem |
 
 **Refactor note.** The per-step bound, overshoot indicator and comfort penalty
 were implemented three times (thermal_config, thermal_battery, shared tank).
 They are extracted into `_add_temp_bound`, `_overshoot_indicator` and
-`_comfort_penalty` and used by all three paths. This is behaviour-preserving:
+`_comfort_penalty`. The shared-tank path uses all three; thermal_config and
+thermal_battery use the overshoot and penalty helpers and keep their hard
+bounds inline. This is behaviour-preserving:
 no existing test is changed, and plans without thermal loads are
 byte-identical. I know `optimization.py` restructurings normally need an issue
 first; the extraction is limited to these three helpers, which the new storage
 features need anyway. I can split it into its own PR if you prefer.
 
-**Recovery ramp.** The two constants (6 steps minimum, 0.5 C per step) are
-design choices. Before this change such a run was infeasible and published
-nothing, so no working configuration changes. They are module-level constants
-(`SHARED_TANK_START_RECOVERY_STEPS`, `SHARED_TANK_START_RECOVERY_RATE`).
+**Recovery window.** When a storage starts below a near-term floor, the hard
+floor is ramped up from the start temperature (at most 0.5 C per step, over at
+least 6 steps), and every degree below the configured floor inside that window
+is priced with a weight that dominates energy prices. A storage that can
+recover in one step therefore still does (the plan is the same as before); one
+that cannot follows the ramp instead of making the problem infeasible. The
+three values are module-level constants (`SHARED_TANK_START_RECOVERY_STEPS`,
+`SHARED_TANK_START_RECOVERY_RATE`, `SHARED_TANK_START_RECOVERY_PENALTY`) and
+are design choices.
 
 ### Fixes to the new code in this PR
 
@@ -43,11 +50,17 @@ nothing, so no working configuration changes. They are module-level constants
   it is now rejected.
 - `tank_transfers` from a previous compile were kept or duplicated on re-merge;
   they are now replaced.
-- The relaxed fallback now restores the transfer variables, so a reused
-  problem does not publish a frozen pump schedule after one rescue.
+- After a relaxed rescue, `P_transfer_*` is read from the problem that was
+  solved (it was published as zeros), and the transfer variables are restored
+  afterwards, so a reused problem does not publish a frozen pump schedule.
 - A lag at the end of the horizon no longer crashes the build.
 - A `null` in `min_temperatures` means "no bound at this step" instead of
   becoming `nan`.
+
+Known limits, left as they are: the relaxed fallback keeps the transfer on/off
+binaries (it is still a MILP, not a pure LP), and window solar duplicates the
+formula of the existing `solar_absorption_area` path rather than reusing its
+helper.
 
 ### Documentation
 
@@ -55,7 +68,8 @@ nothing, so no working configuration changes. They are module-level constants
   `thermal_battery` / `thermal_config`); tank-to-tank transfers; the recovery
   ramp; where a transfer-only storage's temperature and the `P_transfer_*`
   columns appear; the shared-ID rule.
-- `plan_output_schema.md`: the `P_transfer_{from}_{to}` columns.
+- `plan_output_schema.md`: the `P_transfer_{from}_{to}` columns and the
+  transfer-only storage column.
 
 ### Users without temperature management
 
@@ -69,7 +83,3 @@ DataFrames are byte-identical.
 - Every commit with tests: red on the base, green with the change.
 - Full suite: 1309 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-https://claude.ai/code/session_01QGQMaX47ARAZFK2bVCiJwC

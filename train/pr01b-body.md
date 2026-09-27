@@ -9,10 +9,18 @@ solution and publishes it to the sensors like an optimal one, with
 `optim_status` `"Optimal_Inaccurate"`. But `last_run` only mapped the literal
 `"Optimal"` to `ok`, so:
 
-- `/api/v1/last-run` reported the run as `error`, and health checks built on it
-  flagged a healthy run; and
+- `/api/v1/last-run` reported that run as `error`; and
 - the `/api/v1/plan` gate, which mirrors the same criterion, kept serving the
   previous plan, so the endpoint disagreed with the sensors.
+
+**Who sees this:** only setups with `LP_SOLVER=CPLEX` or `GUROBI`. In cvxpy,
+those solvers return `optimal_inaccurate` for example when the time limit is
+hit with a feasible solution. The default HiGHS solver never returns it (a
+HiGHS time-out is `user_limit`), so zero-config users see no change.
+
+This is a visible change on `/api/v1/last-run` for those users (`error` becomes
+`ok`). The same event on HiGHS goes through the relaxed fallback instead; how
+that should be reported is the open question in <link to issue>.
 
 #### Change
 
@@ -25,7 +33,8 @@ solution and publishes it to the sensors like an optimal one, with
 - `publish_data.md`: the `optim_status` row said "Optimal or Infeasible". It
   now explains each value (`Optimal`, `Optimal_Inaccurate`,
   `Optimal (Relaxed)`, `Infeasible`), what it means for the plan, and how
-  last-run and `/api/v1/plan` report it.
+  last-run and `/api/v1/plan` report it (the plan endpoint keeps the last good
+  plan after a failed run).
 
 ### 2. publish-data skips atomic-write temp files
 
@@ -39,16 +48,14 @@ instead of skipping that one file. It now skips them the same way.
 ### Scope
 
 No schema change: last-run still uses `ok` / `infeasible` / `error`. The
-optimizer itself is not touched, so no plan changes for any configuration,
-with or without thermal loads.
+optimizer itself is not touched, so no plan changes for any configuration.
 
 ### Verification
 
-- The three regression tests (last-run mapping, plan gate, temp-file skip)
-  fail on master and pass with the fix.
-- Full suite: 1232 passed, 1 skipped, 34 xfailed. Six tests failed in a sandbox without network and with this machine's Solcast day counter exhausted: three fetch live open-meteo data, three hit the machine-global Solcast quota counter. All six fail identically on master there, none touches this change, and PR <link to PR 1> fixes the three Solcast tests and one of the open-meteo ones.
+- Three regression tests (last-run mapping, plan gate, temp-file skip) fail on
+  master and pass with the fix; the mapping test also checks the spelling
+  against `cp.OPTIMAL_INACCURATE.title()`. A fourth test pins that
+  `Optimal (Relaxed)` stays `error`.
+- Full suite: all tests pass except ones that need network access or a fresh
+  Solcast daily quota, which fail identically on master.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-https://claude.ai/code/session_01QGQMaX47ARAZFK2bVCiJwC

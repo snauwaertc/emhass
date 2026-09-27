@@ -7,7 +7,7 @@ probed with small reproducers. The agents did not commit anything.
 
 "Status" is what was done about each finding after the review.
 
-## Summary
+## Summary (findings as reported; see "Status after fixes" below)
 
 | PR | Verdict | Blocking findings |
 |---|---|---|
@@ -38,11 +38,10 @@ logic.
 
 ## Cross-cutting (decision for the author)
 
-- **Authorship:** some commits are authored by `Claude <noreply@anthropic.com>`,
-  and many carry `Co-Authored-By` / `Claude-Session` trailers. The session link
-  is private. Decide before opening upstream whether to re-author to yourself
-  and whether to keep the trailers.
-- **One old commit in PR 3** says `Co-Authored-By: Claude Opus 4.8`.
+- **Authorship and trailers:** done. Every commit is now authored and
+  committed by the contributor (one commit keeps its upstream co-contributor),
+  and assistant trailers and session links are removed from commit messages
+  and PR bodies.
 - **AGENTS.md "issue first":** several PRs change `optimization.py` output by
   more than ~3 lines. Reviewers suggest opening an issue first for:
   - PR 2 (overshoot on continuous loads);
@@ -212,3 +211,23 @@ logic.
    - `cop_solver` is a config setting;
    - link to the MPC page;
    - units.
+
+## Status after fixes
+
+Every blocking and medium finding was fixed on its branch, with a regression
+test that fails without the fix where the finding was a code defect. The stack
+was then rebased, and each branch's full suite was re-run.
+
+| PR | Fixed | Left as is, stated in the PR body |
+|---|---|---|
+| 1 | doc scope of `min_temperature_curve`; silent 15 C fallback; publish ids matched by position; "at least one" demand model; test nits; **new: default publish ids padded when a topology adds loads (was IndexError)** | the smaller side effects are now listed in the body |
+| 1b | docs/comment say which solvers return `Optimal_Inaccurate`; test tied to `cp.OPTIMAL_INACCURATE` | branch name; empty-publish crash (predates the PR) |
+| 2 | no-op cache-key commit dropped; published `min_temp_heater` is the enforced floor; caller references; stale docstring | overshoot plan change on continuous loads (flagged; can move to an issue) |
+| 3 | overshoot gate no longer makes semi-continuous sources infeasible; capped semi-continuous sources documented; combi-tank indoor default 20 C; type validation (no 500, no `"false"` extend); min on/off times do not leak in extend mode; exact error text | heat-pump warning logger; cap gate on cooling tanks; split suggestion offered in the body |
+| 4 | `P_transfer_*` published from the solved problem after a rescue, with a real test; recovery floor is soft and priced (no longer loosens reachable floors); zone example bounds the horizon; schema doc | window-solar duplication; relaxed fallback keeps transfer binaries |
+| 5 | DP includes the flat standing loss; no-op test really checks no DP; cooling source with `heating_curve`; `cop_solver` validated; half time limit for Gurobi/CPLEX too; `static` builds exactly the old problem; docs corrected | DP ignores `desired_temperatures` / per-step bounds, DP runtime, coupled-store demand, absolute consistency check (all stated) |
+| 6 | `min_power` collision warns for continuous sources too, once per change; `max_thermal_power` validation | none |
+| 7 | per-load `prior_heat` unit (W) and recipe; cadence per time step; alignment logged; cache trade-off stated; storage-level field documented | making `prior_heat` a Parameter (follow-up) |
+| 8 | end-to-end day-ahead test; all MPC-only wording; rollover caveat; comments and type hint | design question for the maintainer (stated) |
+| 9 | **time-limited solves kept only with a proven feasible incumbent** (HiGHS `primal_solution_status`, else constraint check), also for the DP and the relaxed solve; real time-out test; discriminating mutex test; docs | none |
+| 10 | walkthrough JSON conversion, default sensors and what they drive, profile alignment, `costfun` for the gas track, migration guide fields and per-load arrays, several wording fixes | none |

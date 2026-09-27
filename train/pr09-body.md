@@ -1,4 +1,4 @@
-## feat: relaxed-LP fallback - keep mutual exclusion, keep time-limited incumbents, report both as ok
+## feat: relaxed fallback - keep mutual exclusion, keep time-limited incumbents, report both as ok
 
 > Implements the three proposals in <link to relaxed-fallback issue>. Open it
 > once the maintainer has chosen; each proposal is its own commit, so any of
@@ -23,9 +23,16 @@ instead of "Optimal (Relaxed)" with both loads running.
 
 `user_limit` was in the fail list, so a MILP that hit `lp_solver_timeout` was
 discarded for the relaxed LP even when HiGHS held a feasible, binary-respecting
-incumbent. That incumbent is now published as **"Optimal (Incumbent)"**; the
-relaxed fallback runs only for infeasible, unbounded, no-status or no-value
-solves. The DP COP re-solve uses the same shared predicate.
+incumbent. That incumbent is now published as **"Optimal (Incumbent)"**.
+
+A value is not proof of an incumbent: with cvxpy 1.7.5 and HiGHS, a time-out
+before any solution is found also returns `user_limit` with value 0.0, every
+variable at 0 and the constraints violated. So the incumbent is kept only when
+HiGHS reports a feasible primal solution (`primal_solution_status == 2`); for
+other solvers the constraint violations are checked directly. Without that
+proof the run goes to the relaxed fallback, exactly as before. The DP COP
+re-solve uses the same shared predicate, and the relaxed problem (a MILP too,
+since it keeps the mutex binaries) may also use a feasible incumbent.
 
 ### 3. Every published plan is "ok" on the API
 
@@ -40,6 +47,8 @@ No schema change (`ok` / `infeasible` / `error` as before).
   an "Optimal (Relaxed)" plan that violates the group.
 - A solve that times out after finding a feasible plan now publishes that plan
   ("Optimal (Incumbent)") instead of the relaxed LP's plan.
+- With `cop_solver` `auto` or `dp`, a DP re-solve that times out with a feasible
+  incumbent is now accepted; before, the static plan was kept.
 - `/api/v1/last-run` reports relaxed and incumbent runs as `ok` instead of
   `error`, and `/api/v1/plan` serves them.
 
@@ -57,13 +66,13 @@ non-thermal configurations gives byte-identical result DataFrames.
 ### Verification
 
 - The mutex test (26 h of mutually exclusive runtime in 24 h) fails on the
-  base and passes; the max_supply_temperature gate is still checked in a forced
-  relaxed fallback. The incumbent and status tests fail on the base and pass.
+  base and passes. A forced fallback with a mutual-exclusion group of two
+  semi-continuous loads never runs both (8 overlapping steps on the base). The
+  max_supply_temperature gate is still checked in a forced relaxed fallback.
+- A real time-out without incumbent (`lp_solver_timeout` 1e-6, no mocks) is not
+  published as "Optimal (Incumbent)"; the incumbent check is unit-tested on
+  HiGHS reports and on a direct constraint check.
 - Full suite: 1371 passed, 1 skipped, 32 xfailed. Two tests that fetch live
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-https://claude.ai/code/session_01QGQMaX47ARAZFK2bVCiJwC

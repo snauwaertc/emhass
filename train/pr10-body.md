@@ -15,13 +15,16 @@ Stacked on <link to PR 7> (it documents features from PRs 2-7).
   - **Which model to use**: a table from "your system" to `thermal_config`,
     `thermal_battery` or `heat_topology`, each with a starting page;
   - **Moving from `thermal_battery` to `heat_topology`**: a field-by-field
-    mapping, and the load renumbering to watch for;
+    mapping (including fields with no equivalent), and the load count and
+    per-load arrays to adjust;
   - a pointer to the optional COP refinement.
 - **`study_cases/hybrid_heating_walkthrough.md`**: heat pump + gas boiler, DHW
   tank + buffer feeding the house through a tank-to-tank transfer, with a
-  mutual-exclusion group. It covers the topology, the load and column
-  numbering, a rolling MPC call, publishing, what to expect, and
-  troubleshooting. Linked from the study-case index.
+  mutual-exclusion group. It covers the topology (in Python notation, with the
+  conversion to JSON for the configuration page), the load and column
+  numbering, a rolling MPC call, the default sensors and what each one drives,
+  how a consumer profile aligns with the horizon, which `costfun` prices the gas
+  track, what to expect, and troubleshooting. Linked from the study-case index.
 - **`heat_topology.md`**: clarifies that a transfer-only storage's temperature
   and the `P_transfer_*` columns are in the plan but not published as sensors.
 
@@ -44,7 +47,3 @@ Docs and one test only; no code changes.
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-https://claude.ai/code/session_01QGQMaX47ARAZFK2bVCiJwC

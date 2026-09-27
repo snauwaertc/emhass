@@ -20,16 +20,41 @@ Stacked on <link to PR 2>; the diff below is only this PR's.
 
 `param_definitions.json`, `config_defaults.json` and `associations.csv` are not
 changed. `runtime_params.json` gains the two runtime parameters (additive).
-The only existing behaviour that changes is the tank-level
-`overshoot_temperature`: a semi-continuous source is now gated through its
-on/off binary and big-M is sized from the tank's bounds instead of a fixed 100.
-The upstream soft-comfort tests pass unchanged.
+Existing shared-tank behaviour that changes:
+
+- **Tank-level `overshoot_temperature`:** each source now gets its own
+  indicator (so it can take a per-source threshold), and big-M is sized from
+  the tank's bounds instead of a fixed 100. A source is still switched off while
+  the tank is above the threshold at the start of a step, as before, for
+  continuous and semi-continuous sources alike. The upstream soft-comfort tests
+  pass unchanged.
+- **Combi tanks:** without `indoor_target_temperature`, the building demand of a
+  tank that also has a draw-off profile is computed against 20 C, not the tank's
+  hot-water floor.
+- **Single-constant pin:** a shared-tank member is no longer pinned ON by an
+  in-progress single-constant run. It is temperature-driven, and pinning a
+  capped source ON while the tank starts above its ceiling contradicts the cap
+  and forces the relaxed fallback.
+- **Warm-start cache key:** a `thermal_source` block is now part of the key, so
+  changing it rebuilds the problem. Shared tanks bypass the cache anyway (#970),
+  so this only matters if that bypass is lifted later.
+- **Validation:** `heat_topology` with a wrong top-level type (for example
+  `"flows": "x"`) or a non-boolean `extend_deferrable_loads` is rejected with a
+  field-naming `ValueError` (before: HTTP 500 on save, and `"false"` enabled
+  extend mode).
+
+**Size.** This PR bundles eight features. If the maintainer prefers smaller
+reviews, it splits cleanly into four: (1) `max_supply_temperature` and its
+warning; (2) additive demand and per-source overshoot; (3) runtime tanks, start
+temperatures and extend mode; (4) the config-page text box and save-time
+validation.
 
 ### Documentation
 
 - `heat_topology.md`: the new source fields with a heat pump + booster example;
-  why `supply_temperature` is not a ceiling; per-source overshoot as a
-  two-stage preference; combi tanks; a **Combining with other deferrable
+  why `supply_temperature` is not a ceiling; why a capped source should be
+  continuous; per-source overshoot as a
+  two-stage preference; combi tanks (and their default indoor target); a **Combining with other deferrable
   loads** section with the renumbering warning; the config page's text box and
   save-time validation; `shared_tank_start_temperatures` for rolling MPC.
 - `passing_data.md`: the two runtime parameters.
@@ -46,7 +71,8 @@ tank sets it.
 
 ### Verification
 
-- Each feature commit has tests that fail on the base and pass with it; the two
+- Each feature commit has tests that fail on the base and pass with it,
+  including a semi-continuous source under an overshoot threshold; the two
   end-to-end tests (runtime tanks, topology next to ordinary loads) are
   integration guards.
 - Existing tests: no optimization, utils, web-server or command-line test is
@@ -57,13 +83,10 @@ tank sets it.
 - Browser smoke test of the configuration page (Chromium, zero-config
   defaults): the page renders, `heat_topology` is a text box, a valid topology
   is saved to `config.json`, an invalid one is rejected with
-  `heat_topology.flows[0].from='ghost_source' does not match any source.id`
+  `heat_topology is invalid: heat_topology.flows[0].from='ghost_source' does not
+  match any source.id`
   and the file is left untouched. The only console error is that expected 400.
 - Full suite: 1293 passed, 1 skipped, 32 xfailed. Two tests that fetch live
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-https://claude.ai/code/session_01QGQMaX47ARAZFK2bVCiJwC

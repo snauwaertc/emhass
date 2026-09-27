@@ -27,13 +27,20 @@ Stacked on <link to PR 6>; the diff below is only this PR's.
     storage id, like `shared_tank_start_temperatures`.
 - Values are validated (finite, non-negative, numeric): this is runtime state
   from a plan or sensor feed, and a bad value would otherwise skew the
-  trajectory into a plausible-but-wrong Optimal plan. A malformed runtime feed
-  warns and degrades to the cold start. A shorter list is right-aligned.
+  trajectory into a plausible-but-wrong Optimal plan. A malformed
+  `shared_tank_prior_heat` entry warns and is ignored (cold start for that
+  storage); a malformed per-load `prior_heat` in `def_load_config` raises a
+  `ValueError`, like the other `thermal_config` fields. A shorter list is
+  right-aligned, a longer one keeps its most recent values, and either
+  alignment is logged.
 - Absent or empty gives zeros, which reproduces the current behaviour exactly.
-- `prior_heat` stays structural in the optimization cache key (like
-  `draw_off_demand`), because it is baked into the constraint as a raw array;
-  this is noted at the exclusion list so it is not later "optimized" into a
-  stale-state bug.
+- `prior_heat` stays structural in the optimization cache key, because it is
+  baked into the constraint as a raw array; this is noted at the exclusion list
+  so it is not later "optimized" into a stale-state bug. **Trade-off:** a
+  `thermal_config` load whose `prior_heat` changes every run misses the
+  warm-start cache every run. (Shared tanks already rebuild every run.) Making it
+  a `cp.Parameter` refreshed on a cache hit would restore warm starts; I kept
+  that out of this PR.
 - `prior_heat` is added to the #943 known-key list for `thermal_config`, so
   using it no longer triggers an "unknown key is ignored" warning.
 - `runtime_params.json`: `shared_tank_prior_heat` (additive).
@@ -43,7 +50,10 @@ Stacked on <link to PR 6>; the diff below is only this PR's.
 - `heat_topology.md`: why a lagged storage needs an initial condition under
   rolling MPC, `shared_tank_prior_heat`, and how to keep it current from
   **delivered** heat, not from the new plan's own first steps.
-- `thermal_model.md`: `prior_heat` on a `thermal_config` load.
+- `thermal_model.md`: `prior_heat` on a `thermal_config` load, in input W,
+  with its own update recipe.
+- Both recipes shift the window once per completed time step, and resend the
+  same list when MPC runs more often than that.
 - `passing_data.md`: `shared_tank_prior_heat`.
 
 ### Users without temperature management
@@ -61,7 +71,3 @@ are unchanged too.
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-https://claude.ai/code/session_01QGQMaX47ARAZFK2bVCiJwC

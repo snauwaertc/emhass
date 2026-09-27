@@ -18,6 +18,7 @@ on a live install and by a 20-day rolling-MPC replay against measured data
 | building_demand gains | a shared tank using the building physics model ignored `window_area` / `shgc` / `internal_gains_factor` (the compiler folds them onto the tank, the physics call never passed them) | planned heating 1.8-2.2x measured in the #539 replay |
 | def_current_power pin | shared-tank members (`thermal_source`) were not treated as thermal loads by the step-0 power pin | a continuous heat pump on a shared tank had its t=0 power hard-pinned; the run could go Infeasible |
 | predicted temperature publish | `_publish_thermal_loads` skipped `thermal_source` loads | `custom_predicted_temperature_id` published nothing for heat_topology configs |
+| default publish ids | the default per-load entity lists were built from the configured load count, before a heat_topology compile or a runtime `def_load_config` raises it | publish-data raised `IndexError` for a topology with more flows than configured loads, unless every id was passed |
 | open-meteo fail-soft | on a cold start, a failed open-meteo request returned `None` and crashed with a `TypeError` the #997 fail-soft guard does not catch | an offline `list`-method setup with a thermal load crashed instead of planning without solar gains |
 | open-meteo weather for heat_topology | `_list_method_needs_weather` only recognised `thermal_config` / `thermal_battery` | `list`-method setups with heat_topology computed every curve COP against the constant 15 C fallback |
 | null `min_temperatures` entry | `np.maximum` propagates the NaN of a null static entry | the weather-compensated curve floor was dropped for exactly the slots marked curve-only |
@@ -36,10 +37,14 @@ when onboarding:
   so); `building_demand` honours `window_area` / `shgc` /
   `internal_gains_factor`; a new **Publishing results** section (flow order =
   load index, `predicted_temp_heater{k}` / `heating_demand_heater{k}`, the
-  `custom_*_id` runtime parameters); where the outdoor temperature comes from
-  per weather method and what to pass when it is unavailable.
-- `thermal_battery.md`: exactly one demand model is required; a `null`
-  `min_temperatures` entry defers to `min_temperature_curve`.
+  `custom_*_id` runtime parameters, matched by position, with default names
+  for loads without an entry); where the outdoor temperature comes from
+  per weather method, that the 15 C fallback is silent, and what to pass when
+  it is unavailable.
+- `thermal_battery.md`: at least one demand model is required; for shared
+  tanks and heat_topology storage, a `null` `min_temperatures` entry defers to
+  `min_temperature_curve` (a standalone `thermal_battery` does not read the
+  curve).
 - `thermal_model.md`: `thermal_inertia` is applied in whole timesteps
   (rounded down) and capped at the horizon.
 - `config.md`: `def_minimum_on_time` / `def_minimum_off_time` padding and
@@ -58,6 +63,18 @@ both error paths: a `null` in `def_minimum_on_time` / `def_minimum_off_time`
 now means 0 instead of stopping the run, and an Open-Meteo cold-start failure
 now fails with a readable `ValueError` instead of a `TypeError`.
 
+Smaller side effects of the fixes, for completeness:
+
+- `def_minimum_on_time` / `def_minimum_off_time` now go through the same runtime
+  normalisation as the other per-load arrays: a runtime scalar is broadcast to
+  every load, and a short runtime list logs the #1040 warning.
+- A negative `thermal_inertia` is clamped to 0 (before, it built a malformed
+  model).
+- The building_demand gains are part of the problem when it is built. With the
+  warm-start cache a reused problem keeps the first run's gains, the same way
+  it already keeps the outdoor temperature; the next PR bypasses the cache for
+  shared tanks.
+
 ### Not in this PR (on purpose)
 
 - **Lag rounding.** The per-load path truncates `thermal_inertia / time_step`
@@ -72,7 +89,3 @@ now fails with a readable `ValueError` instead of a `TypeError`.
 - Every regression test: red on master, green with its fix.
 - Full suite on this branch: 1244 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on master there and are untouched by this PR.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-https://claude.ai/code/session_01QGQMaX47ARAZFK2bVCiJwC

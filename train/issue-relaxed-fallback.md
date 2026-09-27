@@ -25,8 +25,10 @@ running daily on a live install.
    incumbent. For long horizons with several semi-continuous loads that
    incumbent is usually a better plan than the relaxed LP, which may run a
    semi-continuous load below its nominal power.
-   *Proposal:* when the status is `user_limit` and `prob.value` is not None,
-   keep the incumbent and publish it as a distinct status (e.g.
+   *Proposal:* when the status is `user_limit` and the solver reports a
+   feasible solution (HiGHS: `primal_solution_status == 2`; a value alone is not
+   enough, since a time-out before any solution also returns value 0.0), keep
+   the incumbent and publish it as a distinct status (e.g.
    `"Optimal (Incumbent)"`); fall back to the relaxed LP only for
    infeasible/unbounded/no-value.
 
