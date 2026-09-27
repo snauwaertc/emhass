@@ -13064,7 +13064,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_tank_transfer_missing_endpoint_forces_zero_and_warns(self):
-        """Bug A regression: a tank_transfers entry whose endpoint id has no shared
+        """Regression: a tank_transfers entry whose endpoint id has no shared
         tank (so no temperature variable exists) must be forced to zero with a
         WARNING - not left bounded only by 0 <= q <= max_power, which would let the
         solver pump energy uphill (cold -> hot) with no gradient check."""
@@ -13262,6 +13262,38 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
                 cached_ids,
                 f"transfer_vars[{key}] still points at the relaxed problem's variable",
             )
+
+    def test_shared_tank_start_just_below_floor_recovers_immediately(self):
+        """The recovery ramp keeps a tank that starts below its floor feasible, but
+        it must not let a tank that can recover in one step linger below the floor:
+        the configured floor stays priced inside the window. Here a 5 kW source
+        lifts a 100 L tank from 44.5 C past 45 C in one step, even though the
+        first steps are expensive."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
+        self._setup_single_hp(supply_temperature=55.0, nominal=5000)
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "dhw",
+                "load_ids": [0],
+                "volume": 0.1,
+                "start_temperature": 44.5,
+                "thermal_loss": 0.0,
+                "min_temperatures": [45.0] * 48,
+                "max_temperatures": [60.0] * 48,
+            }
+        ]
+        opt = self.create_optimization()
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            np.array([0.40] * 4 + [0.05] * 44),
+            np.full(48, 0.02),
+        )
+        self.assertEqual(opt.optim_status, "Optimal")
+        temps = res["predicted_temp_heater0"].to_numpy()
+        self.assertGreaterEqual(temps[1:].min(), 45.0 - 0.01)
 
     def test_shared_tank_start_below_floor_recovers_gracefully(self):
         """A shared tank whose live start temperature is BELOW its hard minimum

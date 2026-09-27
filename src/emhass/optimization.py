@@ -119,6 +119,13 @@ SHARED_TANK_START_RECOVERY_STEPS = 6
 # tank simply outruns the floor and reaches band earlier on its own.
 SHARED_TANK_START_RECOVERY_RATE = 0.5
 
+# Objective weight (per degree C per step) on the shortfall below the configured
+# floor inside the recovery window. The ramp above only keeps the problem
+# feasible; this weight dominates energy prices, so a tank whose sources can
+# recover faster than the ramp still does so, and only a tank that physically
+# cannot catch up is allowed to follow the ramp.
+SHARED_TANK_START_RECOVERY_PENALTY = 1000.0
+
 
 class Optimization:
     r"""
@@ -4386,6 +4393,7 @@ class Optimization:
             v for t, v in enumerate(min_temperatures_list) if t >= 1 and v is not None
         ]
         max_deficit = max((v - start_temperature for v in constrained_floors), default=0.0)
+        recovery_idx, recovery_floor = [], []
         if max_deficit > 1e-6:
             # Never steeper than the conservative rate, and small shortfalls are still
             # spread over at least the minimum window so recovery stays gentle.
@@ -4394,19 +4402,25 @@ class Optimization:
             )
             window = int(np.ceil(max_deficit / rate))
             min_temperatures_list = list(min_temperatures_list)
-            for t in range(min(window, len(min_temperatures_list))):
+            for t in range(min(window, len(min_temperatures_list), required_len)):
                 cfg = min_temperatures_list[t]
                 if cfg is None:
                     continue
-                min_temperatures_list[t] = min(cfg, start_temperature + rate * t)
-            self.logger.info(
-                "Shared tank '%s': start %.1f C below a near-term floor (max shortfall "
-                "%.1f C) - ramping the min back into band over %d steps to stay feasible",
-                tank_id,
-                start_temperature,
-                max_deficit,
-                window,
-            )
+                ramp = start_temperature + rate * t
+                if t >= 1 and ramp < cfg:
+                    recovery_idx.append(t)
+                    recovery_floor.append(cfg)
+                min_temperatures_list[t] = min(cfg, ramp)
+            if recovery_idx:
+                self.logger.info(
+                    "Shared tank '%s': start %.1f C below a near-term floor (max shortfall "
+                    "%.1f C) - the floor is soft over the next %d steps so the tank can "
+                    "recover at a feasible pace",
+                    tank_id,
+                    start_temperature,
+                    max_deficit,
+                    recovery_idx[-1],
+                )
 
         # Hard min/max temperature bounds (shared helper; index 0 already pinned).
         self._add_temp_bound(
@@ -4530,6 +4544,13 @@ class Optimization:
                 sense_coeff,
                 required_len,
             )
+
+        # Inside the recovery window the configured floor is soft: price every
+        # degree below it so the tank recovers as fast as its sources allow.
+        if recovery_idx:
+            shortfall = cp.pos(np.array(recovery_floor) - predicted_temp[recovery_idx])
+            recovery_term = -SHARED_TANK_START_RECOVERY_PENALTY * cp.sum(shortfall)
+            penalty_term = recovery_term if penalty_term is None else penalty_term + recovery_term
 
         return predicted_temp, heating_demand, penalty_term
 
