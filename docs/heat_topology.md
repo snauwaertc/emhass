@@ -49,13 +49,14 @@ A topology may contain these top-level keys:
 | `sources` | Heat pumps, boilers, electric heaters, or other heat sources. |
 | `storage` | Thermal stores or effective thermal masses. |
 | `consumers` | DHW draw profiles, building demand, or pool comfort demand. |
-| `flows` | Directed source-to-storage connections. Each flow becomes one deferrable load. |
+| `flows` | Directed connections. A source-to-storage flow becomes one deferrable load; a storage-to-storage flow is a heat transfer (see [Tank-to-tank transfers](#tank-to-tank-transfers)). |
 | `actuator_groups` | Optional constraints across flows that share physical equipment. |
 | `cost_tracks` | Optional per-timestep energy prices referenced by sources. |
 
-IDs must be unique within `sources` and `storage`. Every `flow.from` must match
-a source ID, every `flow.to` must match a storage ID, and every
-`consumer.target` must match a storage ID.
+IDs must be unique within `sources` and `storage`, and a source and a storage
+cannot share an ID. Every `flow.from` must match a source or storage ID, every
+`flow.to` must match a storage ID, and every `consumer.target` must match a
+storage ID.
 
 ### Sources
 
@@ -165,6 +166,51 @@ unless a source sets its own. That makes a two-stage setup a preference: with
 pump and `75` on the electric element, the element lifts the band above
 55 degrees Celsius only when the comfort penalty justifies it. The band stays
 soft, so comfort alone cannot make the problem infeasible.
+
+If the storage starts below its minimum temperature (for example after a cold
+night, or a momentary sensor reading), the minimum is ramped linearly from the
+start temperature up to the configured value over at least 6 timesteps (longer
+for a larger gap, at 0.5 degrees Celsius per step), so the storage only has to
+recover at a feasible pace instead of making the problem infeasible. The
+configured minimum applies in full after that window.
+
+#### Building-zone storage
+
+A storage can also model a building zone (a house or a room) as a thermal mass
+whose temperature drifts inside its comfort band. This is the load-shifting
+model of the standalone [thermal model](thermal_model.md), available inside a
+topology so a zone can be fed by the same hybrid sources as a tank. All fields
+are optional; without them a storage is a water tank as before.
+
+| Field | Units | Description |
+| --- | --- | --- |
+| `thermal_mass` | kWh/K | Heat capacity, instead of `volume`. |
+| `loss_coefficient` | kW/K | Heat-loss coefficient UA. The loss becomes `UA * (T - outdoor)`, so a warmer zone loses more and the optimizer can pre-heat on cheap power and coast through a price peak. Cannot be combined with a `building_demand` consumer, which also models the loss to outdoor. |
+| `thermal_inertia` | hours | Delay between heat input and the temperature response, as in the thermal model. Applied in whole timesteps (rounded down) and capped at the horizon. |
+| `window_area`, `shgc` | m2, fraction | Solar gain through glazing from the GHI forecast (`window_area * shgc * GHI`), which offsets the zone's heating need. `shgc` defaults to `0.6`. |
+
+For example, a house held between 19.5 and 21.5 degrees Celsius, with a
+soft target of 20.5:
+
+```json
+{
+  "id": "house",
+  "thermal_mass": 18,
+  "loss_coefficient": 0.79,
+  "start_temperature": 20.5,
+  "min_temperatures": [19.5],
+  "max_temperatures": [21.5],
+  "desired_temperatures": 20.5
+}
+```
+
+With these fields the older single-load models can be written as one-source
+storage (their own configuration paths stay as they are):
+
+| Model | As topology storage |
+| --- | --- |
+| [`thermal_battery`](thermal_battery.md) | one source, `volume`, and a `profile` consumer. |
+| [`thermal_config`](thermal_model.md) | one source, `thermal_mass`, `loss_coefficient`, `thermal_inertia` and a comfort band. `cooling_constant` corresponds to `loss_coefficient / thermal_mass`. |
 
 For predictable constraints, make the maximum-temperature array cover the
 optimization horizon. A shorter minimum-temperature array is extended using
@@ -312,6 +358,24 @@ individual minimum and nominal limits while respecting the group cap. A group
 cap below a required member's feasible power can make the thermal problem
 infeasible.
 
+### Tank-to-tank transfers
+
+A flow from one storage to another moves heat between them, for example a
+buffer feeding a room through its emitters:
+
+```json
+{"from": "buffer", "to": "house", "transfer_coefficient": 0.8, "max_transfer_power": 6000}
+```
+
+| Field | Units | Description |
+| --- | --- | --- |
+| `transfer_coefficient` | kW/K | Emitter conductance; default `1.0`. The transfer is at most `transfer_coefficient * (T_from - T_to)`. |
+| `max_transfer_power` | W | Maximum transferred heat power; default unlimited. |
+
+Heat only flows from the hotter storage to the cooler one: when the receiver is
+as warm as the feeder or warmer, the transfer is zero. A storage that is only
+fed by a transfer (no source flow) still gets a temperature state.
+
 ## Publishing results
 
 Each flow compiles to one deferrable load, numbered in the order of `flows`
@@ -333,6 +397,14 @@ When several flows feed the same storage, each of those loads reports that
 storage's temperature. The ids are matched by position (entry `k` is load `k`);
 loads without an entry publish under the default names, such as
 `sensor.p_deferrable{k}` and `sensor.temp_predicted{k}`.
+
+A storage fed only by a transfer has no load of its own; its temperature is in
+`predicted_temp_heater{k}` with `k` equal to the number of deferrable loads plus
+its position in the tank list (its position in `storage`, after any manual
+`shared_thermal_tanks` in extend mode). Each transfer adds a `P_transfer_{from}_{to}` column
+to the result (delivered heat, W): the schedule to drive the circulation pump
+with. These columns are in the result CSV and the `/api/v1/plan` output; they
+are not published as Home Assistant sensors.
 
 ### Rolling MPC
 
@@ -386,7 +458,8 @@ path for:
 - flows that reference unknown sources or storage;
 - consumers that target unknown storage;
 - unsupported source or consumer types;
-- source or storage entries without an `id`;
+- source or storage entries without an `id`, or an ID used by both a source and
+  a storage;
 - missing heat-pump supply-temperature data;
 - a `profile` consumer without `profile`;
 - a source `min_power` greater than its `nominal_power`;
