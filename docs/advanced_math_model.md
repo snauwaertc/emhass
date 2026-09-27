@@ -257,9 +257,10 @@ $$
 where $C$ is the store's heat capacity in kWh/K (from a water `volume` or a
 building `thermal_mass`), $Q_{in}$ is the heat delivered by its sources, $Q_{xfer}$
 the net heat exchanged with other stores, $D$ the demand drawn from it (hot-water
-draw-off and/or building heat loss), and $L$ the standing loss. The loss is either a
-flat hot-water standing loss or, for a building zone, a **state-dependent** term
-$L[i] = UA\,(T[i]-T_{out}[i])\,\Delta_t$ - so a warmer zone loses faster, which is
+draw-off and/or building heat loss), and $L$ the standing loss, all as average
+powers in kW over the step. The loss is either a flat hot-water standing loss or,
+for a building zone, a **state-dependent** term
+$L[i] = UA\,(T[i]-T_{out}[i])$ - so a warmer zone loses faster, which is
 what lets the optimizer pre-heat the mass on cheap power and coast through a peak.
 
 The heat a source contributes depends on its type. An electric resistive element
@@ -275,13 +276,15 @@ temperature, so every re-plan starts from the real sensor value.
 **Start-temperature recovery.** If the live temperature starts *below* the hard
 floor (a momentary out-of-band reading on a cold morning), demanding the full floor
 from the next step would be infeasible - a high-mass store cannot jump back into
-band in one step. EMHASS instead ramps the floor up from the measured start at a
-conservative rate, so the store is only required to recover at a feasible pace; the
-configured floor reapplies in full once it has caught up.
+band in one step. EMHASS instead ramps the hard floor up from the measured start at
+a conservative rate and prices every degree below the configured floor inside that
+window, so a store recovers as fast as its sources allow and never makes the problem
+infeasible; the configured floor reapplies in full once the ramp has caught up.
 
 **Tank-to-tank transfers.** A store can feed another through an emitter conductance
-(for example a buffer supplying a room or a pool). The transferred heat
-$Q_{xfer}=k\,(T_{from}-T_{to})$ is bounded by a maximum delivered power, and leaves
+(for example a buffer supplying a room or a pool). The transferred heat is a
+decision bounded by $Q_{xfer} \le k\,(T_{from}-T_{to})$ and by a maximum delivered
+power (and is zero when the receiver is as warm or warmer), and leaves
 the source store while entering the sink store in the same balance.
 
 ### Non-electric sources and the capacity tariff
@@ -342,18 +345,26 @@ To recover the true optimum without abandoning the fast LP, EMHASS adds a post-s
 2. **Exact DP.** When engaged, EMHASS discretizes the store temperature into a grid
    and solves the store's trajectory by backward induction, evaluating the *true*
    COP at every state. Dynamic programming handles the non-convexity directly: no
-   linearization, and a single backward pass yields the globally optimal temperature
-   schedule and heat-pump/backup dispatch.
+   linearization, and a single backward pass yields the optimal temperature schedule
+   and heat-pump/backup dispatch on that temperature grid (the coupled store's state
+   is interpolated).
 3. **Coupled store.** A buffer that feeds a larger banking store (such as a pool)
    can be refined *jointly* - a second state in the DP - so the decision to
    super-heat accounts for what the coupled store can absorb. The coupled grid is
    bounded to keep the state space tractable.
-4. **Re-solve.** The DP's COP, and a ceiling at the DP-optimal peak temperature, are
-   fed back as a corrected parameter and an extra constraint, and the LP is solved
-   once more. The ceiling prevents the re-solve from exploiting the now-fixed
-   favourable COP by super-heating past the true optimum.
+4. **Re-solve.** The DP's COP, and a ceiling (1 degree above the higher of the DP's
+   peak temperature and the temperature the static COP is valid for), are fed back as
+   a corrected parameter and an extra constraint, and the problem is solved once
+   more, as a new problem with half of the HiGHS time limit. The ceiling prevents the
+   re-solve from exploiting the now-fixed favourable COP by super-heating past the
+   true optimum.
 
-If the refinement fails for any reason it degrades safely to the original LP plan.
+If the re-solve fails or times out, the original plan is kept. If the DP finds no
+feasible trajectory, the store is capped at the temperature its static COP is valid
+for and re-solved. The DP uses one minimum and maximum temperature for the whole
+horizon and does not see the soft `desired_temperature`; the re-solve still
+enforces both. The DP itself is not bound by the solver time limit: a coupled
+store near the 200-state cap can take tens of seconds on slow hardware.
 
 **Cooling.** For a `cool` store fed by a heat pump with a `cooling_curve`, the DP runs
 in cooling mode: the unit removes heat, the evaporator runs below the store
@@ -383,7 +394,7 @@ reflected in the true COP at each hour instead of being averaged away.
 
 ### The `cop_solver` setting
 
-The refinement is controlled by two `optim_conf` options:
+The refinement is controlled by three `optim_conf` options:
 
 - `cop_solver` (`auto` | `dp` | `static`): `static` (the default) disables the
   refinement and keeps the pure-LP plan; `auto` runs the consistency check and engages

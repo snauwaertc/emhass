@@ -6298,14 +6298,19 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
     def test_dp_resolve_opts_halve_time_budget(self):
         """The DP re-solve runs AFTER the main solve may have spent its full time
         budget; giving it the full budget again can nearly double a cycle's wall
-        clock. It gets half the budget (floor 10 s) - warm-started and only adding
-        bound constraints, it is expected to finish well within that."""
+        clock. It gets half the budget (floor 10 s)."""
         opts = {"time_limit": 120, "mip_rel_gap": 0.01}
         out = Optimization._dp_resolve_opts(opts)
         self.assertEqual(out["time_limit"], 60.0)
         self.assertEqual(out["mip_rel_gap"], 0.01)
         self.assertEqual(opts["time_limit"], 120, "original opts must not be mutated")
         self.assertEqual(Optimization._dp_resolve_opts({"time_limit": 12})["time_limit"], 10.0)
+        # Gurobi and CPLEX name their limits differently; both are halved too.
+        self.assertEqual(Optimization._dp_resolve_opts({"TimeLimit": 60})["TimeLimit"], 30.0)
+        cplex = {"cplex_params": {"timelimit": 60, "threads": 2}}
+        out = Optimization._dp_resolve_opts(cplex)
+        self.assertEqual(out["cplex_params"], {"timelimit": 30.0, "threads": 2})
+        self.assertEqual(cplex["cplex_params"]["timelimit"], 60)  # input untouched
         self.assertNotIn("time_limit", Optimization._dp_resolve_opts({}))
 
     def test_second_curve_heat_pump_on_tank_warns_not_silent(self):

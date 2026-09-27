@@ -5062,7 +5062,8 @@ class Optimization:
         saved_values = [(v, v.value) for v in self.prob.variables()]
         try:
             # Half the time budget: the main solve may already have spent the full
-            # limit, and the warm-started re-solve only adds bound constraints.
+            # limit. prob2 is a new cp.Problem, so the solver starts cold; the
+            # warm_start flag only helps solvers that seed from variable values.
             prob2.solve(
                 solver=selected_solver, warm_start=True, **self._dp_resolve_opts(solver_opts)
             )
@@ -6024,16 +6025,24 @@ class Optimization:
         """Solver options for the DP refinement's re-solve: half the time budget.
 
         The re-solve runs AFTER the main solve may already have spent its full
-        ``time_limit``; handing it the full budget again can nearly double a
-        cycle's wall clock on exactly the hard problems that hit the limit. It
-        warm-starts from the static solution and only adds bound constraints, so
-        half the budget (floor 10 s) is ample. A re-solve that times out is
-        rejected by ``_accept_dp_resolve`` and the static solve is kept. Returns a
-        copy - never mutates the input.
+        time limit; handing it the full budget again can nearly double a cycle's
+        wall clock on exactly the hard problems that hit the limit. Half the
+        budget (floor 10 s) applies to each solver's own limit option: HiGHS
+        ``time_limit``, Gurobi ``TimeLimit`` and CPLEX ``cplex_params['timelimit']``.
+        A re-solve that times out is rejected by ``_accept_dp_resolve`` and the
+        static solve is kept. Returns a copy - never mutates the input.
         """
+
+        def half(value):
+            return max(10.0, float(value) / 2.0)
+
         opts = dict(solver_opts)
-        if "time_limit" in opts:
-            opts["time_limit"] = max(10.0, float(opts["time_limit"]) / 2.0)
+        for key in ("time_limit", "TimeLimit"):
+            if key in opts:
+                opts[key] = half(opts[key])
+        cplex = opts.get("cplex_params")
+        if isinstance(cplex, dict) and "timelimit" in cplex:
+            opts["cplex_params"] = {**cplex, "timelimit": half(cplex["timelimit"])}
         return opts
 
     def perform_optimization(
