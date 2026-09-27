@@ -14047,6 +14047,17 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         # And the refinement actually engaged (a heat-pump tank was registered).
         self.assertTrue(opt_auto._dp_tank_entries)
 
+    def test_unknown_cop_solver_falls_back_to_static(self):
+        """A misspelt cop_solver must not silently run the DP: it warns and uses
+        static."""
+        self.optim_conf["cop_solver"] = "Dynamic"
+        with self.assertLogs(logger, level="WARNING") as logs:
+            opt = self.create_optimization()
+        self.assertEqual(opt._cop_solver, "static")
+        self.assertTrue(any("cop_solver" in line for line in logs.output))
+        self.optim_conf["cop_solver"] = " Auto "
+        self.assertEqual(self.create_optimization()._cop_solver, "auto")
+
     def test_dp_cop_refinement_noop_when_consistent(self):
         """When the static COP is already consistent with the tank temperatures the
         plan reaches, auto mode must not run the DP and must return the static plan.

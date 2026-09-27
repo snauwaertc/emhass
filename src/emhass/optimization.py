@@ -786,6 +786,16 @@ class Optimization:
         # min_temperature_curve combined), keyed by tank index; filled when the
         # tank is built and published as min_temp_heater{k} for its members.
         self._shared_tank_min_floors = {}
+        # COP refinement mode, validated once: an unknown value (e.g. a typo) falls
+        # back to the default instead of silently running the DP.
+        cop_solver = str(self.optim_conf.get("cop_solver", "static")).strip().lower()
+        if cop_solver not in ("static", "auto", "dp"):
+            self.logger.warning(
+                "cop_solver=%r is not one of 'static', 'auto', 'dp'; using 'static'",
+                self.optim_conf.get("cop_solver"),
+            )
+            cop_solver = "static"
+        self._cop_solver = cop_solver
         def_load_config = self.optim_conf.get("def_load_config", []) or []
         for k in range(num_def_loads):
             if k < len(def_load_config) and def_load_config[k]:
@@ -4638,9 +4648,7 @@ class Optimization:
         # so dp_hp_info stays None) and keeps its exact static COP. The one cooling
         # exception - a cool tank with a COUPLED store - is skipped at registration
         # below (thermal_dp does not support that combination yet).
-        _dp_active = (
-            dp_hp_info is not None and self.optim_conf.get("cop_solver", "static") != "static"
-        )
+        _dp_active = dp_hp_info is not None and self._cop_solver != "static"
         if _dp_active:
             if not hasattr(self, "_dp_tank_entries"):
                 self._dp_tank_entries = []
@@ -4825,7 +4833,7 @@ class Optimization:
         super-heating past it), and re-solve once. The DP is exact in a single pass.
         """
         entries = getattr(self, "_dp_tank_entries", [])
-        mode = self.optim_conf.get("cop_solver", "static")
+        mode = self._cop_solver
         if not entries or mode == "static" or self.prob is None or self.prob.value is None:
             return
         from emhass.thermal_dp import ThermalDPParams, solve_thermal_dp
