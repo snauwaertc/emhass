@@ -4884,6 +4884,12 @@ class Optimization:
                 xfer_val = np.asarray(getattr(xfer, "value", xfer), dtype=float)
                 ext = e["heating_demand"][:n].astype(float).copy()
                 ext[: len(xfer_val)] -= xfer_val  # xfer_net = inflow - outflow
+                # A tank without loss_coefficient loses a flat thermal_losses per
+                # step (kWh), which the LP subtracts like a demand; the DP only
+                # models the temperature-dependent loss, so add the flat one here.
+                if e.get("thermal_losses") is not None:
+                    flat = np.asarray(e["thermal_losses"], dtype=float)[:n]
+                    ext[: len(flat)] += flat
                 coupled = e.get("coupled")
                 if coupled is not None and coupled.get("q_var") is not None:
                     # ext currently = draw-off + outflow-to-coupled + other outflow. The

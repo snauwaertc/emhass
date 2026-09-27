@@ -14454,6 +14454,55 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             "the cached problem must not carry the DP re-solve's extra constraints",
         )
 
+    def test_dp_refinement_includes_flat_standing_loss(self):
+        """A water tank without loss_coefficient loses a flat thermal_loss every
+        step, which the LP subtracts like a demand. The DP must see it too, or it
+        plans the tank colder than the LP and sets an optimistic COP."""
+        from emhass import thermal_dp
+
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [0.0] * 48
+        self._setup_single_hp(nominal=6000)
+        self.optim_conf["def_load_config"] = [
+            {
+                "thermal_source": {
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 30,
+                        "min_supply": 25,
+                        "max_supply": 40,
+                    },
+                    "carnot_efficiency": 0.45,
+                }
+            },
+        ]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "dhw",
+                "load_ids": [0],
+                "volume": 0.3,
+                "start_temperature": 45.0,
+                "thermal_loss": 0.1,
+                "draw_off_demand": [0.0] * 48,
+                "min_temperatures": [40.0] * 48,
+                "max_temperatures": [60.0] * 48,
+            }
+        ]
+        self.optim_conf["cop_solver"] = "dp"
+        seen = []
+        original = thermal_dp.solve_thermal_dp
+
+        def capture(price, outdoor, params, **kwargs):
+            seen.append(np.asarray(params.demand_kw, dtype=float))
+            return original(price, outdoor, params, **kwargs)
+
+        opt = self.create_optimization()
+        with mock.patch.object(thermal_dp, "solve_thermal_dp", capture):
+            self._solve_default_inputs(opt)
+        self.assertTrue(seen, "the DP refinement must run with cop_solver='dp'")
+        # No draw-off and no transfers: the DP demand is exactly the flat loss (kW).
+        np.testing.assert_allclose(seen[0], 0.1, atol=1e-6)
+
     def _dp_refinable_setup(self):
         """A heating-curve HP on a zone tank with cop_solver=dp: the DP refinement
         always runs and produces a re-solve (prob2)."""
