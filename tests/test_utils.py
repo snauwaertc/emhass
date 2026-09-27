@@ -1762,6 +1762,22 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(ValueError, field):
                     utils.compile_heat_topology(topo(storage_extra, transfer_extra))
 
+    def test_cool_source_with_heating_curve_keeps_working(self):
+        """A sense='cool' source configured with heating_curve (the only curve key
+        before cooling_curve existed) must keep using it."""
+        curve = {"slope": 0.5, "offset": 20, "min_supply": 7, "max_supply": 18}
+        outdoor = np.array([25.0, 30.0, 35.0])
+        cops = utils.resolve_thermal_battery_cop(
+            {"sense": "cool", "heating_curve": curve, "carnot_efficiency": 0.4}, outdoor
+        )
+        expected = utils.calculate_cop_heatpump(
+            supply_temperature=utils.apply_heating_curve(curve, outdoor),
+            carnot_efficiency=0.4,
+            outdoor_temperature_forecast=outdoor,
+            mode="cool",
+        )
+        np.testing.assert_allclose(cops, expected)
+
     def test_compile_heat_topology_rejects_wrong_types(self):
         """Wrong top-level types raise the documented ValueError instead of an
         AttributeError, and a string extend flag is not treated as true."""

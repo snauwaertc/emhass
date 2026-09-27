@@ -482,10 +482,15 @@ def resolve_thermal_battery_cop(
         hc.get("sense") or "heat", field_name="sense", context="thermal_battery"
     )
     # Curve mode: per-slot supply T from outdoor T (weather compensation). Heat sources
-    # read `heating_curve`, cool sources read `cooling_curve`; both fall back to a constant
-    # `supply_temperature` when no curve is configured. A curve makes the supply (and hence
-    # the COP) vary over the horizon, which is what makes the source DP-refinable.
-    curve = hc.get("cooling_curve") if sense == "cool" else hc.get("heating_curve")
+    # read `heating_curve`, cool sources read `cooling_curve` (and, as before that key
+    # existed, a `heating_curve` when no `cooling_curve` is set); both fall back to a
+    # constant `supply_temperature` when no curve is configured. A curve makes the supply
+    # (and hence the COP) vary over the horizon, which is what makes the source
+    # DP-refinable.
+    if sense == "cool":
+        curve = hc.get("cooling_curve") or hc.get("heating_curve")
+    else:
+        curve = hc.get("heating_curve")
     if curve:
         supply_temperature = apply_heating_curve(curve, outdoor_temperature_forecast)
     else:
