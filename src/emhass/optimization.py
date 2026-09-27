@@ -7175,6 +7175,7 @@ class Optimization:
                 if "q_input_var" in params
             }
             original_transfer_vars = getattr(self, "transfer_vars", {})
+            original_dp_tank_entries = self._dp_tank_entries
 
             # Relax Configuration: Disable Binary Logic
             n_def = self.optim_conf["number_of_deferrable_loads"]
@@ -7261,6 +7262,7 @@ class Optimization:
             # next run reads the cached problem's own objects (issue #1048).
             self.vars.update(original_hybrid_vars)
             self.transfer_vars = original_transfer_vars
+            self._dp_tank_entries = original_dp_tank_entries
             for k, params in self.param_thermal.items():
                 if k in original_q_input_vars:
                     params["q_input_var"] = original_q_input_vars[k]
