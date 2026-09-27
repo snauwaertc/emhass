@@ -12,7 +12,7 @@ only new peaks above it cost money. `dayahead-optim` dropped the value
 treated the incurred peak as 0 and minimised the absolute import peak: a flat
 grid, at the expense of price arbitrage underneath a peak that is already paid
 for. A household that runs a day-ahead plan with a dynamic tariff and a monthly
-capacity tariff (e.g. Belgium) gets a worse plan than the MPC path would give.
+capacity tariff gets a worse plan than the MPC path would give.
 
 ### Change
 
