@@ -16,7 +16,7 @@ Stacked on <link to PR 3>; the diff below is only this PR's.
 | Window solar for zones | storage `window_area`, `shgc` | gain `window_area * shgc * GHI` from the forecast already fetched for PV |
 | Tank-to-tank transfers | storage-to-storage `flows` with `transfer_coefficient` (kW/K), `max_transfer_power` (W) | hot-to-cold only, at most `k * (T_from - T_to)`; zero when the receiver is as warm or warmer |
 | Pump schedule | result columns `P_transfer_{from}_{to}` (W) | additive columns in the result CSV and `/api/v1/plan`; not published as HA sensors |
-| Start below the floor | - | a storage that starts below its minimum gets a linear recovery ramp (at least 6 steps, 0.5 C per step for larger gaps) instead of an infeasible problem |
+| Start below the floor | - | a storage that starts below a minimum it must meet soon (including a setback floor that rises a few steps later) gets a recovery ramp (at most 0.5 C per step, over at least 6 steps) instead of an infeasible problem |
 
 **Refactor note.** The per-step bound, overshoot indicator and comfort penalty
 were implemented three times (thermal_config, thermal_battery, shared tank).
@@ -67,7 +67,7 @@ DataFrames are byte-identical.
 ### Verification
 
 - Every commit with tests: red on the base, green with the change.
-- Full suite: 1308 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on the base there.
+- Full suite: 1309 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

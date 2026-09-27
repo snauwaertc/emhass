@@ -46,7 +46,7 @@ with or without thermal loads.
 
 - The three regression tests (last-run mapping, plan gate, temp-file skip)
   fail on master and pass with the fix.
-- Full suite: 1231 passed, 1 skipped, 34 xfailed. Six tests failed in a sandbox without network and with this machine's Solcast day counter exhausted: three fetch live open-meteo data, three hit the machine-global Solcast quota counter. All six fail identically on master there, none touches this change, and PR <link to PR 1> fixes the three Solcast tests and one of the open-meteo ones.
+- Full suite: 1232 passed, 1 skipped, 34 xfailed. Six tests failed in a sandbox without network and with this machine's Solcast day counter exhausted: three fetch live open-meteo data, three hit the machine-global Solcast quota counter. All six fail identically on master there, none touches this change, and PR <link to PR 1> fixes the three Solcast tests and one of the open-meteo ones.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
