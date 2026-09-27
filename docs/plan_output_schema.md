@@ -44,7 +44,10 @@ if major != 1:
 deferrable / thermal load), and `cost_fun_<name>` (one column per cost-function
 component the chosen `costfun` decomposes into). A `heat_topology` with
 tank-to-tank transfers also adds one `P_transfer_{from}_{to}` column per transfer
-(delivered heat, W, non-negative); it is not published to Home Assistant.
+(delivered heat, W, non-negative). A storage that is only fed by a transfer has
+no load of its own: its temperature is in `predicted_temp_heater{n + i}`, where
+`n` is the number of deferrable loads and `i` the storage's position in the
+topology. Neither is published to Home Assistant.
 
 | Column | Source helper | Unit | Sign convention | Conditional | HA scaling | `type_var` | Notes |
 |--------|---------------|------|-----------------|-------------|------------|------------|-------|

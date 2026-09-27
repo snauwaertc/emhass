@@ -25,7 +25,7 @@ In the add-on configuration page, the field is a multi-line text box. Paste
 valid JSON, not a quoted JSON string. When you save, EMHASS compiles the
 topology first: an invalid topology is not saved, and the alert names the
 offending field, for example:
-`heat_topology is invalid: heat_topology.flows[2].from='ghost_source' does not match any source.id`.
+`heat_topology is invalid: heat_topology.flows[2].from='ghost_source' does not match any source.id or storage.id`.
 For example, the Python configuration below
 can be converted to JSON with:
 
@@ -169,10 +169,12 @@ soft, so comfort alone cannot make the problem infeasible.
 
 If the storage starts below a minimum temperature it must meet soon (after a
 cold night, a momentary sensor reading, or a setback floor that rises a few
-steps later), the early minimums are ramped up from the start temperature at no
-more than 0.5 degrees Celsius per step, spread over at least 6 timesteps. The
-storage then only has to recover at a feasible pace instead of making the
-problem infeasible; each configured minimum applies in full once the ramp
+steps later), the early minimums become soft: the hard floor is ramped up from
+the start temperature at no more than 0.5 degrees Celsius per step, spread over
+at least 6 timesteps, and every degree below the configured minimum inside that
+window carries a high penalty. A storage whose sources can recover quickly
+still does so right away; one that cannot follows the ramp instead of making
+the problem infeasible. Each configured minimum applies in full once the ramp
 reaches it.
 
 #### Building-zone storage
@@ -191,17 +193,18 @@ are optional; without them a storage is a water tank as before.
 | `window_area`, `shgc` | m2, fraction | Solar gain through glazing from the GHI forecast (`window_area * shgc * GHI`), which offsets the zone's heating need. `shgc` defaults to `0.6`. |
 
 For example, a house held between 19.5 and 21.5 degrees Celsius, with a
-soft target of 20.5:
+soft target of 20.5, on a 48-step horizon (Python notation; convert it to JSON
+as shown above):
 
-```json
+```python
 {
-  "id": "house",
-  "thermal_mass": 18,
-  "loss_coefficient": 0.79,
-  "start_temperature": 20.5,
-  "min_temperatures": [19.5],
-  "max_temperatures": [21.5],
-  "desired_temperatures": 20.5
+    "id": "house",
+    "thermal_mass": 18,
+    "loss_coefficient": 0.79,
+    "start_temperature": 20.5,
+    "min_temperatures": [19.5],  # a short minimum list is extended
+    "max_temperatures": [21.5] * 48,  # a maximum list is not: one value per step
+    "desired_temperatures": 20.5,
 }
 ```
 
