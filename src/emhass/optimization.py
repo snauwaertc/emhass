@@ -4108,10 +4108,12 @@ class Optimization:
             loss_coefficient = float(loss_coefficient)
             if loss_coefficient < 0:
                 raise ValueError(f"Shared tank {tank_id}: loss_coefficient must be >= 0 kW/K")
+        # Same whole-step convention as the per-load thermal_config path (truncate),
+        # clamped to the horizon so the lagged window never runs past it.
         lag_steps = max(
             0,
             min(
-                int(round(float(tank.get("thermal_inertia", 0.0)) / self.time_step)),
+                int(float(tank.get("thermal_inertia", 0.0)) / self.time_step),
                 required_len - 1,
             ),
         )
@@ -4346,17 +4348,22 @@ class Optimization:
                 == predicted_temp[:L]
                 + conversion * (xfer_net[:L] - heating_demand[:L] - loss_vec[:L])
             )
-            constraints.append(
-                predicted_temp[1 + L :]
-                == predicted_temp[L:-1]
-                + conversion
-                * (
-                    sense_coeff * _raw_heat(-1 - L)
-                    + xfer_net[L:]
-                    - heating_demand[L:-1]
-                    - loss_vec[L:-1]
+            # At the top of the clamp (L == required_len - 1) the dead zone above
+            # already covers the whole remaining horizon, so this block spans zero
+            # rows: there is nothing left for it to constrain, and building it anyway
+            # is a cvxpy dimension error.
+            if 1 + L < required_len:
+                constraints.append(
+                    predicted_temp[1 + L :]
+                    == predicted_temp[L:-1]
+                    + conversion
+                    * (
+                        sense_coeff * _raw_heat(-1 - L)
+                        + xfer_net[L:]
+                        - heating_demand[L:-1]
+                        - loss_vec[L:-1]
+                    )
                 )
-            )
 
         # Recovery grace: if the tank STARTS below its hard minimum (a momentary
         # out-of-band sensor read - e.g. a zone dips below its comfort floor on a cold

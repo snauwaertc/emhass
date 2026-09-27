@@ -13320,6 +13320,38 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             "Configured floor must hold once the recovery window closes",
         )
 
+    def test_shared_tank_lag_at_the_clamp_boundary_builds(self):
+        """thermal_inertia=23.5 h at a 0.5 h step is exactly required_len - 1 = 47
+        steps, so the lagged 'main dynamics' block spans zero rows on every operand
+        and cvxpy raised `ValueError: Invalid dimensions (0,).` while building it -
+        before any solve. The dead zone already pins every remaining row there, so
+        the block must simply be skipped."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [5.0] * 48
+        self._setup_single_hp(supply_temperature=40.0)
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "house",
+                "load_ids": [0],
+                "thermal_mass": 8.0,
+                "loss_coefficient": 0.3,
+                "thermal_inertia": 23.5,  # 23.5/0.5 = 47 == required_len - 1
+                "start_temperature": 20.5,
+                # Deliberately wide, so nothing but the build bug can fail this.
+                "min_temperatures": [-50.0] * 48,
+                "max_temperatures": [100.0] * 48,
+            }
+        ]
+        opt = self.create_optimization()
+        opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        self.assertIn(opt.optim_status, ("Optimal", "Optimal (Relaxed)"))
+
 
 if __name__ == "__main__":
     unittest.main()
