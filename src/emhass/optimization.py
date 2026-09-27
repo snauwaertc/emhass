@@ -7302,6 +7302,7 @@ class Optimization:
             }
             original_transfer_vars = getattr(self, "transfer_vars", {})
             original_dp_tank_entries = self._dp_tank_entries
+            original_semi_cont_on_level = self._semi_cont_on_level
 
             # Relax Configuration: Disable Binary Logic
             n_def = self.optim_conf["number_of_deferrable_loads"]
@@ -7389,6 +7390,7 @@ class Optimization:
             self.vars.update(original_hybrid_vars)
             self.transfer_vars = original_transfer_vars
             self._dp_tank_entries = original_dp_tank_entries
+            self._semi_cont_on_level = original_semi_cont_on_level
             for k, params in self.param_thermal.items():
                 if k in original_q_input_vars:
                     params["q_input_var"] = original_q_input_vars[k]
