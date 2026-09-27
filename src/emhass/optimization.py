@@ -5088,6 +5088,10 @@ class Optimization:
                 )
                 constraints.append(q_var == 0)
 
+        # Expose the per-flow pump decisions so the results frame can surface them
+        # after the solve (read via q_var.value in _build_results_dataframe).
+        self.transfer_vars = transfer_vars
+
         return predicted_temps, heating_demands, penalty_terms_total, q_inputs
 
     def _add_deferrable_group_constraints(self, constraints, relaxed=False):
@@ -5185,6 +5189,11 @@ class Optimization:
             p_def_k = get_val(self.vars["p_deferrable"][k])
             opt_tp[f"P_deferrable{k}"] = p_def_k
             p_def_sum += p_def_k
+
+        # Tank-to-tank transfers (modulated pump flows): one additive column per
+        # flow, in W to match the other power columns - the actionable pump schedule.
+        for (frm, to), q_var in getattr(self, "transfer_vars", {}).items():
+            opt_tp[f"P_transfer_{frm}_{to}"] = get_val(q_var) * 1000.0  # kW -> W
 
         # Battery Results (#610). This independently recomputes the SOC/P_batt
         # recursion per battery in numpy space over realized values; it must
@@ -6497,6 +6506,7 @@ class Optimization:
                 for k, params in self.param_thermal.items()
                 if "q_input_var" in params
             }
+            original_transfer_vars = getattr(self, "transfer_vars", {})
 
             # Relax Configuration: Disable Binary Logic
             n_def = self.optim_conf["number_of_deferrable_loads"]
@@ -6581,6 +6591,7 @@ class Optimization:
             # Restore the instance-held references the rebuild replaced, so the
             # next run reads the cached problem's own objects (issue #1048).
             self.vars.update(original_hybrid_vars)
+            self.transfer_vars = original_transfer_vars
             for k, params in self.param_thermal.items():
                 if k in original_q_input_vars:
                     params["q_input_var"] = original_q_input_vars[k]
