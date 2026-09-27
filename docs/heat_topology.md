@@ -167,12 +167,13 @@ pump and `75` on the electric element, the element lifts the band above
 55 degrees Celsius only when the comfort penalty justifies it. The band stays
 soft, so comfort alone cannot make the problem infeasible.
 
-If the storage starts below its minimum temperature (for example after a cold
-night, or a momentary sensor reading), the minimum is ramped linearly from the
-start temperature up to the configured value over at least 6 timesteps (longer
-for a larger gap, at 0.5 degrees Celsius per step), so the storage only has to
-recover at a feasible pace instead of making the problem infeasible. The
-configured minimum applies in full after that window.
+If the storage starts below a minimum temperature it must meet soon (after a
+cold night, a momentary sensor reading, or a setback floor that rises a few
+steps later), the early minimums are ramped up from the start temperature at no
+more than 0.5 degrees Celsius per step, spread over at least 6 timesteps. The
+storage then only has to recover at a feasible pace instead of making the
+problem infeasible; each configured minimum applies in full once the ramp
+reaches it.
 
 #### Building-zone storage
 

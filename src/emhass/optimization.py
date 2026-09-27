@@ -4370,33 +4370,41 @@ class Optimization:
                     )
                 )
 
-        # Recovery grace: if the tank STARTS below its hard minimum (a momentary
-        # out-of-band sensor read - e.g. a zone dips below its comfort floor on a cold
-        # morning), demanding the full min from t=1 is infeasible for a rate-limited
-        # tank that cannot jump back into band in one step, and the relaxed-LP fallback
-        # cannot rescue that conflict. Instead, ramp the floor up linearly from the
-        # start value to the configured min over a short window, so the tank is required
-        # only to recover at a feasible pace. The configured min applies in full after
-        # the window; the desired-temperature penalty still pulls it up as fast as it can.
-        floor0 = next((v for v in min_temperatures_list if v is not None), None)
-        if floor0 is not None and start_temperature < floor0 - 1e-6:
-            window = max(
-                SHARED_TANK_START_RECOVERY_STEPS,
-                int(np.ceil((floor0 - start_temperature) / SHARED_TANK_START_RECOVERY_RATE)),
+        # Recovery grace: if the tank STARTS below a hard minimum it must satisfy
+        # soon (a momentary out-of-band sensor read - e.g. a zone dips below its
+        # comfort floor on a cold morning), demanding the full min from t=1 is
+        # infeasible for a rate-limited tank that cannot jump back into band in one
+        # step, and the relaxed-LP fallback cannot rescue that conflict. Instead,
+        # ramp every early floor up from the live start at a conservative rate, so the
+        # tank is only required to recover at a feasible pace; floors already at or
+        # below the ramp line are untouched, and each configured floor reapplies in
+        # full once the ramp line overtakes it. Index 0 is the pinned live start and
+        # is never bounded (see _add_temp_bound), so only the constrained floors at
+        # t >= 1 drive the trigger - a setback floor that rises only at t >= 1 (where
+        # min_temperatures[0] may sit below the start) is caught too.
+        constrained_floors = [
+            v for t, v in enumerate(min_temperatures_list) if t >= 1 and v is not None
+        ]
+        max_deficit = max((v - start_temperature for v in constrained_floors), default=0.0)
+        if max_deficit > 1e-6:
+            # Never steeper than the conservative rate, and small shortfalls are still
+            # spread over at least the minimum window so recovery stays gentle.
+            rate = min(
+                SHARED_TANK_START_RECOVERY_RATE, max_deficit / SHARED_TANK_START_RECOVERY_STEPS
             )
+            window = int(np.ceil(max_deficit / rate))
             min_temperatures_list = list(min_temperatures_list)
             for t in range(min(window, len(min_temperatures_list))):
                 cfg = min_temperatures_list[t]
                 if cfg is None:
                     continue
-                ramp = start_temperature + (cfg - start_temperature) * (t / window)
-                min_temperatures_list[t] = min(cfg, ramp)
+                min_temperatures_list[t] = min(cfg, start_temperature + rate * t)
             self.logger.info(
-                "Shared tank '%s': start %.1f C below floor %.1f C - ramping the min "
-                "back into band over %d steps to stay feasible",
+                "Shared tank '%s': start %.1f C below a near-term floor (max shortfall "
+                "%.1f C) - ramping the min back into band over %d steps to stay feasible",
                 tank_id,
                 start_temperature,
-                floor0,
+                max_deficit,
                 window,
             )
 
