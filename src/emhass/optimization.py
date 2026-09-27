@@ -6234,10 +6234,14 @@ class Optimization:
     def _needs_relaxed_retry(status, value) -> bool:
         """Whether a solve is discarded for the binary-relaxed LP fallback.
 
-        Infeasible, unbounded, a time-limited ``user_limit`` result, no status, or no
+        A ``user_limit`` status means the MILP solver hit its time limit, but it
+        usually carries a feasible (near-optimal) incumbent, which is BETTER than the
+        relaxed LP (that fallback drops the semi-continuous binaries, so it can run a
+        min-power source below its physical floor). Keep that incumbent; fall back
+        only when the solve is unusable: infeasible, unbounded, no status, or no
         objective value at all.
         """
-        return status in ("infeasible", "unbounded", "user_limit", None) or value is None
+        return status in ("infeasible", "unbounded", None) or value is None
 
     @staticmethod
     def _accept_dp_resolve(status, value) -> bool:
@@ -7393,8 +7397,9 @@ class Optimization:
         # self.transfer_vars back at the cached problem's.
         solved_transfer_vars = getattr(self, "transfer_vars", {})
 
-        # Check for failure or "bad" status
-        # Note: "user_limit" often means timeout. "infeasible" means configuration conflict.
+        # Check for failure or "bad" status. A 'user_limit' (time-limited) solve that
+        # still carries a feasible incumbent is kept, not discarded for the
+        # binary-relaxed LP fallback - see _needs_relaxed_retry.
         # An accepted DP re-solve already passed the same acceptance policy, so it
         # never needs the rescue; only the static solve is a retry candidate.
         if refined is None and self._needs_relaxed_retry(self.prob.status, self.prob.value):
@@ -7525,6 +7530,15 @@ class Optimization:
                     params["q_input_var"] = original_q_input_vars[k]
                 else:
                     params.pop("q_input_var", None)
+        elif solved_prob.status == "user_limit":
+            self.logger.info(
+                "Accepting time-limited solution (objective %.4g) - feasible incumbent, "
+                "skipping the relaxed LP fallback.",
+                solved_prob.value,
+            )
+            # Mark it so the downstream status gate keeps this binary-respecting
+            # incumbent instead of discarding it.
+            solved_prob._status = "Optimal (Incumbent)"
 
         # Stage-timer breadcrumb: end of solve phase, start of extract phase.
         _extract_start_perf = time.perf_counter() if stage_times is not None else 0.0
@@ -7540,6 +7554,7 @@ class Optimization:
             cp.OPTIMAL,
             cp.OPTIMAL_INACCURATE,
             "Optimal (Relaxed)",
+            "Optimal (Incumbent)",
         ]:
             self.logger.warning("Cost function cannot be evaluated or Infeasible/Unbounded")
 

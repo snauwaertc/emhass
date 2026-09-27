@@ -6285,14 +6285,14 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
 
     def test_dp_resolve_acceptance_matches_relaxed_retry_policy(self):
         """The DP re-solve must accept/reject solver statuses with EXACTLY the same
-        policy as the main path (_needs_relaxed_retry): whatever the main path would
-        discard for the relaxed fallback, including a time-limited user_limit result,
-        keeps the static solve here. A single shared predicate prevents the two lists
+        policy as the main path (_needs_relaxed_retry): a time-limited user_limit
+        result with a feasible incumbent is kept on both paths, and whatever the main
+        path would discard for the relaxed fallback keeps the static solve here. A single shared predicate prevents the two lists
         drifting apart."""
         for status, value, accept in [
             ("optimal", 1.0, True),
             ("optimal_inaccurate", 1.0, True),
-            ("user_limit", 1.0, False),  # time-limited: rejected, like the main path
+            ("user_limit", 1.0, True),  # time-limited incumbent: kept, like the main path
             ("user_limit", None, False),
             ("infeasible", None, False),
             ("infeasible", 1.0, False),
@@ -8322,8 +8322,8 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             status = opt_res["optim_status"].iloc[0]
             self.assertIn(
                 status,
-                ["Optimal", "Optimal (Relaxed)"],
-                f"Expected Optimal or Optimal (Relaxed), got {status}",
+                ["Optimal", "Optimal (Relaxed)", "Optimal (Incumbent)"],
+                f"Expected Optimal or a fallback/incumbent status, got {status}",
             )
 
             # Check Load 0
@@ -15528,6 +15528,46 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self._assert_hp_off_above_cap(
             res, 53.0, "Relaxed fallback must not weaken the max_supply_temperature gate"
         )
+
+    def test_needs_relaxed_retry_accepts_time_limited_incumbent(self):
+        """A time-limited (user_limit) solve with a feasible incumbent must be accepted,
+        not discarded for the binary-relaxed LP fallback - that is the fix for the
+        chronic 400s where a good near-optimal MILP solution was thrown away. Genuinely
+        unusable solves (infeasible/unbounded/None, or no incumbent) still retry."""
+        needs = Optimization._needs_relaxed_retry
+        self.assertFalse(needs("user_limit", 12.3))  # incumbent present -> accept it
+        self.assertTrue(needs("user_limit", None))  # hit the limit, no solution -> retry
+        self.assertFalse(needs("optimal", 5.0))
+        self.assertTrue(needs("infeasible", None))
+        self.assertTrue(needs("infeasible", 5.0))  # infeasible always retries
+        self.assertTrue(needs("unbounded", None))
+        self.assertTrue(needs(None, None))
+
+    def test_dp_refined_time_limited_resolve_publishes_incumbent(self):
+        """When the accepted DP re-solve is itself time-limited (user_limit with a
+        feasible incumbent), the incumbent marking must apply to the problem the
+        extraction reads - the refined one - so it publishes as
+        'Optimal (Incumbent)' rather than being discarded as a raw user_limit."""
+
+        class FakeRefined:
+            def __init__(self):
+                self._status = "user_limit"
+                self.value = -12.5
+
+            @property
+            def status(self):
+                return self._status
+
+        opt = self._dp_refinable_setup()
+        opt._refine_cop_with_dp = lambda *a, **k: FakeRefined()
+        opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        self.assertEqual(opt.optim_status, "Optimal (Incumbent)")
 
 
 if __name__ == "__main__":
