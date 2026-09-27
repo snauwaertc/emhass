@@ -6289,23 +6289,24 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         result with a feasible incumbent is kept on both paths, and whatever the main
         path would discard for the relaxed fallback keeps the static solve here. A single shared predicate prevents the two lists
         drifting apart."""
-        for status, value, accept in [
-            ("optimal", 1.0, True),
-            ("optimal_inaccurate", 1.0, True),
-            ("user_limit", 1.0, True),  # time-limited incumbent: kept, like the main path
-            ("user_limit", None, False),
-            ("infeasible", None, False),
-            ("infeasible", 1.0, False),
-            ("unbounded", 1.0, False),
-            (None, 1.0, False),
+        for status, value, feasible, accept in [
+            ("optimal", 1.0, False, True),
+            ("optimal_inaccurate", 1.0, False, True),
+            ("user_limit", 1.0, True, True),  # proven feasible incumbent: kept
+            ("user_limit", 0.0, False, False),  # time-out without a solution
+            ("user_limit", None, True, False),
+            ("infeasible", None, False, False),
+            ("infeasible", 1.0, False, False),
+            ("unbounded", 1.0, False, False),
+            (None, 1.0, False, False),
         ]:
             self.assertEqual(
-                Optimization._accept_dp_resolve(status, value),
+                Optimization._accept_dp_resolve(status, value, feasible),
                 accept,
-                f"status={status!r} value={value!r}",
+                f"status={status!r} value={value!r} feasible={feasible}",
             )
             self.assertEqual(
-                Optimization._needs_relaxed_retry(status, value),
+                Optimization._needs_relaxed_retry(status, value, feasible),
                 not accept,
                 f"main path disagrees for status={status!r} value={value!r}",
             )
@@ -15530,18 +15531,89 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_needs_relaxed_retry_accepts_time_limited_incumbent(self):
-        """A time-limited (user_limit) solve with a feasible incumbent must be accepted,
-        not discarded for the binary-relaxed LP fallback - that is the fix for the
-        chronic 400s where a good near-optimal MILP solution was thrown away. Genuinely
-        unusable solves (infeasible/unbounded/None, or no incumbent) still retry."""
+        """A time-limited (user_limit) solve with a proven feasible incumbent must be
+        accepted, not discarded for the binary-relaxed fallback, where a good
+        near-optimal MILP solution would be thrown away. Unusable solves
+        (infeasible/unbounded/None, or no proven incumbent) still retry."""
         needs = Optimization._needs_relaxed_retry
-        self.assertFalse(needs("user_limit", 12.3))  # incumbent present -> accept it
-        self.assertTrue(needs("user_limit", None))  # hit the limit, no solution -> retry
+        self.assertFalse(needs("user_limit", 12.3, feasible_incumbent=True))
+        self.assertTrue(needs("user_limit", 0.0))  # a value alone proves nothing
+        self.assertTrue(needs("user_limit", None, feasible_incumbent=True))
         self.assertFalse(needs("optimal", 5.0))
         self.assertTrue(needs("infeasible", None))
         self.assertTrue(needs("infeasible", 5.0))  # infeasible always retries
         self.assertTrue(needs("unbounded", None))
         self.assertTrue(needs(None, None))
+
+    def test_has_feasible_incumbent(self):
+        """HiGHS reports whether a time-limited solve holds a feasible solution
+        (primal_solution_status 2); without that report the constraints are
+        checked directly."""
+        from types import SimpleNamespace
+
+        def highs_like(value, primal_status):
+            return SimpleNamespace(
+                value=value,
+                solver_stats=SimpleNamespace(
+                    extra_stats=SimpleNamespace(primal_solution_status=primal_status)
+                ),
+                constraints=[],
+            )
+
+        has = Optimization._has_feasible_incumbent
+        self.assertTrue(has(highs_like(5.0, 2)))
+        self.assertFalse(has(highs_like(0.0, 0)))
+        self.assertFalse(has(highs_like(None, 2)))
+        x = cp.Variable(2)
+        prob = cp.Problem(cp.Minimize(cp.sum(x)), [x >= 1])
+        prob.solve(solver=cp.HIGHS)
+        prob_no_report = SimpleNamespace(
+            value=prob.value, solver_stats=None, constraints=prob.constraints
+        )
+        self.assertTrue(has(prob_no_report))
+        x.value = np.zeros(2)  # what a time-out without a solution leaves behind
+        self.assertFalse(has(prob_no_report))
+
+    def test_time_out_without_incumbent_is_not_published_as_optimal(self):
+        """With a time limit too short to find any solution, HiGHS returns
+        user_limit with value 0.0 and all variables at 0. That must not be
+        published as 'Optimal (Incumbent)' (an all-zero plan reported as ok); it
+        goes to the relaxed fallback instead."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.optim_conf["lp_solver_timeout"] = 1e-6
+        opt = self.create_optimization()
+        res = self._solve_default_inputs(opt)
+        self.assertNotEqual(opt.optim_status, "Optimal (Incumbent)")
+        if opt.optim_status == "Optimal (Relaxed)":
+            # A published plan must serve the house load: not the all-zero time-out.
+            self.assertGreater(float(res["P_grid"].abs().sum()), 0.0)
+
+    def test_mutual_exclusion_survives_forced_relaxed_fallback(self):
+        """The relaxed fallback keeps mutual_exclusion: two semi-continuous loads
+        in a mutual-exclusion group never run in the same step, even when the
+        fallback is forced."""
+        self.optim_conf.update(
+            {
+                "treat_deferrable_load_as_semi_cont": [True, True],
+                "set_deferrable_load_single_constant": [False, False],
+                "nominal_power_of_deferrable_loads": [2000.0, 1500.0],
+                "operating_hours_of_each_deferrable_load": [4, 4],
+                "deferrable_load_groups": [
+                    {
+                        "names": ["deferrable0", "deferrable1"],
+                        "max_power": 2500,
+                        "mutual_exclusion": True,
+                    }
+                ],
+            }
+        )
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        opt = self.create_optimization()
+        opt._needs_relaxed_retry = lambda *a, **k: True  # force the fallback
+        res = self._solve_default_inputs(opt)
+        self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
+        both = (res["P_deferrable0"] > 1.0) & (res["P_deferrable1"] > 1.0)
+        self.assertFalse(both.any(), "mutual exclusion dropped in the relaxed fallback")
 
     def test_dp_refined_time_limited_resolve_publishes_incumbent(self):
         """When the accepted DP re-solve is itself time-limited (user_limit with a
