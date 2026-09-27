@@ -9259,9 +9259,9 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         Two continuous heat-pump sources feed one shared tank; a group marks them
         mutually exclusive (one compressor cannot serve two flows at once). Demand
         is met comfortably by a single source, so the constraint is feasible and
-        must be honoured - the two sources never run in the same timestep. This
-        guards the regression where an infeasible/timed-out MILP fell back to the
-        relaxed LP, which used to silently drop mutual exclusion and schedule both."""
+        must be honoured - the two sources never run in the same timestep. (The
+        relaxed fallback is covered by
+        test_mutual_exclusion_survives_forced_relaxed_fallback.)"""
         self.df_input_data_dayahead = self.prepare_forecast_data()
         self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
         self.optim_conf["number_of_deferrable_loads"] = 2
@@ -15453,7 +15453,8 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         ]
         # Loads 2 and 3 may never run simultaneously, yet each must deliver
         # 13 h x 1 kW: 26 h of combined runtime in a 24 h horizon. The MILP is
-        # infeasible by construction; the relaxation drops mutual exclusion.
+        # infeasible by construction, and so is the fallback, which keeps mutual
+        # exclusion.
         self.optim_conf["deferrable_load_groups"] = [
             {"names": ["deferrable2", "deferrable3"], "mutual_exclusion": True}
         ]
