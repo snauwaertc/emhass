@@ -79,6 +79,7 @@ watts of source input:
 | `electric` | Optional override for electric-balance membership. |
 | `max_supply_temperature` | Optional hard ceiling (degrees Celsius) on the storage temperature this source can heat into. A number, or a per-timestep list (a short list is extended with its last value). |
 | `overshoot_temperature` | Optional soft threshold (degrees Celsius): with the storage's desired temperature set, this source stops while the storage is above it. Overrides the storage-level `overshoot_temperature`. |
+| `max_thermal_power` | Optional hard ceiling (W) on a heat pump's delivered heat, `COP * electrical power`. A number. |
 | `startup_penalty` | Optional penalty per off-to-on switch, to discourage short cycling; default `0`. Each start costs `startup_penalty × nominal_power (kW) × electricity price × step length (h)`, priced at the electricity tariff even for a fuel source on its own `cost_track`. |
 | `max_startups` | Optional hard limit on the number of starts over the horizon; default `0` (no limit). |
 
@@ -116,6 +117,38 @@ The default is `static`: no refinement, exactly the previous behaviour. Turn it
 on for a buffer or tank that a heat pump regularly charges well above its curve
 supply temperature. A run where it engages takes longer, because of the second
 solve. See [the mathematical model](advanced_math_model.md) for the details.
+
+#### Per-source thermal-output ceiling
+
+A heat pump delivers `COP * electrical power`, and with a weather-compensated
+`heating_curve` the COP climbs steeply on mild days. A small unit can then be
+modelled as delivering far more heat than it can: a 5.7 kW (electrical) heat
+pump at COP 8 would "deliver" about 46 kW, well above its rated 15 kW. Set
+`max_thermal_power` to the unit's rated thermal output to cap the delivered heat
+directly. The optimizer then also draws less electrical power when the unit is
+thermally limited. Unlike `nominal_power`, which bounds electrical input, this
+bounds thermal output, which is what the compressor actually limits.
+
+```json
+"sources": [
+  {"id": "hp", "type": "heatpump", "nominal_power": 5700,
+   "heating_curve": {"slope": 0.7, "offset": 38},
+   "carnot_efficiency": 0.46, "max_thermal_power": 15000,
+   "treat_as_semi_cont": false}
+]
+```
+
+A semi-continuous source runs on/off at one power level. For a capped source
+that level becomes `min(nominal_power, max_thermal_power / COP)` per step, as a
+real unit at its thermal ceiling runs flat-out against whichever limit binds.
+The COP refinement (`cop_solver`) respects the cap as well.
+
+A nonzero `min_power` with a tight `max_thermal_power` on a variable-COP source
+cannot run at steps where `COP * min_power` exceeds `max_thermal_power`
+(typically mild days). The solve still succeeds: those steps are off, other
+sources cover the demand where they can, and a warning names the source and the
+number of affected steps. Lower `min_power` only if the unit really modulates
+that low.
 
 #### Per-source temperature ceiling
 
