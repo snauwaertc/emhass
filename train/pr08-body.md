@@ -34,6 +34,11 @@ capacity tariff gets a worse plan than the MPC path would give.
   cannot exclude the next billing period's steps. A plan that crosses into a new
   period must not carry the old period's peak; the docs say so. Honouring the
   window in day-ahead too would be the fuller alternative.
+- **Open interval:** the history of a partly elapsed capacity interval
+  (`capacity_charge_current_interval_history`) is MPC-only, so with an
+  interval longer than one step a day-ahead horizon should start on an
+  interval boundary; the docs say so.
+- `dayahead-optim` logs the `current_period_peak` it plans with.
 
 Independent of the other PRs in this series; based on master.
 
@@ -43,8 +48,9 @@ Independent of the other PRs in this series; based on master.
   `dayahead-optim` (section heading, parameter list, structural-vs-runtime
   note), and the rollover caveat for day-ahead.
 - `runtime_params.json`: the web UI help text no longer says MPC only.
-- `cookbook/tariff_demand_charge.md`: Step 3 applies to day-ahead as well; the
-  notes list which inputs stay MPC-only.
+- `cookbook/tariff_demand_charge.md`: Step 3 applies to day-ahead as well (with
+  a build that includes this change); the notes list which inputs stay
+  MPC-only.
 
 ### Existing setups
 
