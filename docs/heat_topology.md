@@ -69,7 +69,7 @@ watts of source input:
 | `type` | `heatpump`, `heat_pump`, `gas`, `oil`, `district`, `electric`, or `constant_efficiency`. |
 | `nominal_power` | Maximum source input power in W. |
 | `min_power` | Optional minimum input power in W; default `0`. Must not exceed `nominal_power`. |
-| `treat_as_semi_cont` | Optional on/off-at-nominal behavior; default `true`. |
+| `treat_as_semi_cont` | Optional on/off behavior at `nominal_power` (lower where `max_thermal_power` binds, see below); default `true`. |
 | `supply_temperature` | Fixed heat-pump supply temperature in degrees Celsius. |
 | `heating_curve` | Alternative heat-pump supply-temperature curve. |
 | `cooling_curve` | For a `cool` storage: the same shape as `heating_curve` (defaults `min_supply` 5, `max_supply` 18), giving a weather-compensated chilled supply temperature. The cooling Carnot lift (outdoor minus supply) is applied automatically. |
@@ -143,12 +143,12 @@ that level becomes `min(nominal_power, max_thermal_power / COP)` per step, as a
 real unit at its thermal ceiling runs flat-out against whichever limit binds.
 The COP refinement (`cop_solver`) respects the cap as well.
 
-A nonzero `min_power` with a tight `max_thermal_power` on a variable-COP source
-(semi-continuous or continuous) cannot run at steps where `COP * min_power`
-exceeds `max_thermal_power`
-(typically mild days). The solve still succeeds: those steps are off, other
-sources cover the demand where they can, and a warning names the source and the
-number of affected steps. Lower `min_power` only if the unit really modulates
+A capped source (semi-continuous or continuous) with a nonzero `min_power`
+cannot run at steps where `COP * min_power` exceeds `max_thermal_power`
+(typically mild days, when the COP is high). The solve still succeeds: those
+steps are off, other sources cover the demand where they can, and a warning
+names the deferrable load (numbered in the order of `flows`, see
+[Publishing results](#publishing-results)) and the number of affected steps. Lower `min_power` only if the unit really modulates
 that low.
 
 #### Per-source temperature ceiling
@@ -171,7 +171,7 @@ its ceiling, so the booster is scheduled exactly for the band above it.
 ```
 
 A source may not push the storage past its ceiling within a step. A
-semi-continuous source (the default) runs at its full nominal power, so if one
+semi-continuous source (the default) runs at its full ON level, so if one
 full-power step heats the storage by more than the gap between its temperature
 and the ceiling, that source never runs and the other source does all the work,
 with no warning. Make a capped source continuous (`"treat_as_semi_cont": false`),
@@ -410,8 +410,9 @@ Each flow pair must exactly match an entry in `flows`.
 `max_combined_power` adds a per-timestep cap on the sum of the member flows. It
 does not replace their individual `min_power` and `nominal_power` limits.
 `mutual_exclusion: true` additionally allows at most one member to be active.
-For semi-continuous sources, an active flow runs at its nominal power, so the
-group cap must be at least as large as every member that may run. For
+For semi-continuous sources, an active flow runs at its ON level (its nominal
+power, or less where `max_thermal_power` binds), so the group cap must be at
+least as large as every member that may run. For
 continuous sources, the optimizer may modulate each active flow between its
 individual minimum and nominal limits while respecting the group cap. A group
 cap below a required member's feasible power can make the thermal problem
