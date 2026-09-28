@@ -237,6 +237,34 @@ def test_dp_gain_slack_cannot_mine_phantom_transfer_heat():
     )
 
 
+def test_dp_coupled_store_moves_in_small_steps():
+    """A large coupled store changes by much less than one grid cell per step. The
+    rollout carries its temperature continuously, so it drifts as its losses
+    dictate instead of being snapped back to the same grid point every step."""
+    params = ThermalDPParams(
+        heat_capacity=1.0,
+        min_temp=30.0,
+        max_temp=55.0,
+        demand_kw=0.0,
+        backup_max_power=0.0,
+        coupled_heat_capacity=163.0,
+        coupled_loss_coeff=0.5,  # about 0.015 K per step at 30 C and 20 C ambient
+        coupled_min_temp=26.0,
+        coupled_max_temp=40.0,
+        coupling_coeff=0.0,
+        coupling_max_power=0.0,
+    )
+    res = solve_thermal_dp(
+        np.full(48, 0.20),
+        outdoor_temperature=5.0,
+        params=params,
+        tank_start=40.0,
+        coupled_start=30.0,
+    )
+    ctraj = np.asarray(res.coupled_trajectory)
+    assert ctraj[-1] < ctraj[0] - 0.3, ctraj
+
+
 def test_dp_solves_quickly():
     """The 2-state DP must be fast enough to live inside the optimisation loop."""
     params = ThermalDPParams(

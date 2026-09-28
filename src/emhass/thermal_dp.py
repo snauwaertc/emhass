@@ -319,7 +319,11 @@ def solve_thermal_dp(
     # step): flag it rather than returning a plausible-looking but energy-violating plan.
     start_infeasible = bool(V[it, ic] >= INF * 0.5)
     traj = [grid[it]]
-    ctraj = [cgrid[ic]] if use_coupled else None
+    # The coupled store's state is carried continuously: snapping it to the grid
+    # every step would round small per-step changes (a large store, a fine grid)
+    # back to the same point forever. The policy is read at the nearest grid point.
+    tc = float(np.clip(coupled_start, cgrid[0], cgrid[-1])) if use_coupled else 0.0
+    ctraj = [tc] if use_coupled else None
     hp_draw = np.zeros(N)
     bk_draw = np.zeros(N)
     cost = 0.0
@@ -341,9 +345,11 @@ def solve_thermal_dp(
         hp_draw[t] = qhp / cop_ij / dt
         bk_draw[t] = qbk / p.backup_efficiency / dt
         if use_coupled:
-            Tc2 = cgrid[ic] + (qxf - closs[t, ic]) / p.coupled_heat_capacity
-            ic = int(np.argmin(np.abs(cgrid - Tc2)))
-            ctraj.append(cgrid[ic])
+            tc = float(
+                np.clip(tc + (qxf - closs[t, ic]) / p.coupled_heat_capacity, cgrid[0], cgrid[-1])
+            )
+            ic = int(np.argmin(np.abs(cgrid - tc)))
+            ctraj.append(tc)
         it = j
         traj.append(grid[it])
 
