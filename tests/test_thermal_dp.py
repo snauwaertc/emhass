@@ -458,3 +458,20 @@ def test_cool_mode_rejects_coupled_store():
     params = _cool_params(coupled_heat_capacity=50.0)
     with pytest.raises(NotImplementedError):
         solve_thermal_dp(np.full(24, 0.2), 30.0, params, time_step=0.5, tank_start=10.0)
+
+
+def test_dp_prices_a_soft_comfort_target():
+    """Without a comfort term the DP only sees the hard floor and keeps the store
+    cold; with the LP's desired_temperature / penalty_factor term it heats toward
+    the target (and not beyond it on a flat price). A NaN step carries no target."""
+    params = ThermalDPParams(min_temp=20.0, max_temp=65.0, demand_kw=0.0)
+    cold = solve_thermal_dp(np.full(24, 0.10), -5.0, params, tank_start=25.0)
+    assert cold.tank_trajectory.max() <= 25.0
+    target = np.full(24, 40.0)
+    target[-1] = np.nan
+    params.comfort_target = target
+    params.comfort_penalty = 50.0
+    warm = solve_thermal_dp(np.full(24, 0.10), -5.0, params, tank_start=25.0)
+    assert warm.tank_trajectory[-2] >= 39.5
+    assert warm.tank_trajectory.max() <= 40.0
+    assert warm.total_cost > 0.0  # energy cost only; the penalty is not added

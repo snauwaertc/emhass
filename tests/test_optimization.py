@@ -14094,6 +14094,59 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         worst = float(np.max(cop_used[: n - 1] - cop_reached))
         self.assertLessEqual(worst, opt.optim_conf.get("cop_solver_tolerance", 0.5))
 
+    def test_dp_refinement_keeps_the_comfort_target(self):
+        """The re-solve is bounded to the DP's trajectory, so the DP must see the
+        tank's soft comfort target. Without it the DP only sees the hard floor,
+        keeps the tank at its start temperature, and the re-solve drops the heating
+        the static plan delivered - with an Optimal status."""
+        from emhass import utils
+
+        topo = {
+            "sources": [
+                {
+                    "id": "hp",
+                    "type": "heatpump",
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 38,
+                        "min_supply": 28,
+                        "max_supply": 70,
+                    },
+                    "carnot_efficiency": 0.46,
+                    "nominal_power": 5700,
+                }
+            ],
+            "storage": [
+                {
+                    "id": "tank",
+                    "volume": 1.0,
+                    "start_temperature": 25.0,
+                    "thermal_loss": 0.0,
+                    "min_temperature": [20.0] * 48,
+                    "max_temperature": [65.0] * 48,
+                    "desired_temperature": 40,
+                    "penalty_factor": 50,
+                }
+            ],
+            "flows": [{"from": "hp", "to": "tank"}],
+        }
+        for key, val in utils.compile_heat_topology(topo).items():
+            self.optim_conf[key] = val
+        self.optim_conf["cop_solver"] = "dp"
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [-5.0] * 48
+        opt = self.create_optimization()
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            np.full(48, 0.10),
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertGreater(res["P_deferrable0"].sum(), 0.0)
+        self.assertGreaterEqual(res["predicted_temp_heater0"].iloc[-1], 39.0)
+
     def test_dp_cop_refinement_noop_when_consistent(self):
         """When the static COP is already consistent with the tank temperatures the
         plan reaches, auto mode must not run the DP and must return the static plan.

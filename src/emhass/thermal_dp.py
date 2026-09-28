@@ -81,6 +81,15 @@ class ThermalDPParams:
     coupling_max_power: float = 20.0  # kW
     coupling_levels: int = 11
 
+    # Optional soft comfort target on the store: comfort_target[t] is the target
+    # for the END of step t (NaN: none), and comfort_penalty prices each degree of
+    # shortfall below it (above it in cool mode) - the LP's desired_temperature /
+    # penalty_factor term. Without it the DP sees only the hard floor and plans the
+    # store cold while the LP heats it toward the target. Not included in
+    # ThermalDPResult.total_cost, which stays the energy cost.
+    comfort_target: float | np.ndarray | None = None
+    comfort_penalty: float = 0.0
+
     # External demand drawn directly from the heat-pump store. May be negative
     # (a net solar/window gain): free heat that warms the store; any surplus the
     # discretized state cannot absorb is shed at zero cost, never purchased away.
@@ -193,6 +202,19 @@ def solve_thermal_dp(
     # than ambient) are a passive gain - handled by the surplus slack below.
     loss = p.loss_coeff * (grid[None, :] - amb[:, None]) * dt
     cp_backup = p.backup_price / p.backup_efficiency
+    # Comfort shortfall penalty for reaching target grid[j] at the end of step t.
+    comfort = np.zeros((N, nt))
+    if p.comfort_target is not None and p.comfort_penalty > 0:
+        tgt = np.asarray(
+            np.broadcast_to(p.comfort_target, (N,))
+            if np.ndim(p.comfort_target) == 0
+            else p.comfort_target,
+            dtype=float,
+        )
+        if len(tgt) < N:
+            tgt = np.concatenate([tgt, np.full(N - len(tgt), np.nan)])
+        short = sc * (tgt[:N, None] - grid[None, :])  # (N, nt), NaN where no target
+        comfort = p.comfort_penalty * np.where(np.isnan(short), 0.0, np.maximum(short, 0.0))
 
     use_coupled = p.coupled_heat_capacity is not None
     if use_coupled and p.mode == "cool":
@@ -273,7 +295,7 @@ def solve_thermal_dp(
                 np.maximum(Qpos - bk_cap, 0.0),
             )
             qbk = Qpos - qhp
-            cost = (qhp / cop2d[t][None, :]) * price[t] + qbk * cp_backup  # (i, j)
+            cost = (qhp / cop2d[t][None, :]) * price[t] + qbk * cp_backup + comfort[t][None, :]
             feas_t = (Qin >= -surplus[:, None] - 1e-9) & (Qin <= qin_max[t][None, :] + 1e-9)
             if use_coupled and ncl > 1:
                 Tc2 = cgrid + (qxf - closs[t]) / p.coupled_heat_capacity  # (c,)

@@ -4802,6 +4802,18 @@ class Optimization:
                         ),
                         "hp": dp_hp_info,
                         "backup": backup,
+                        # The LP's comfort term prices predicted_temp[1..n-1]; the
+                        # DP's step t ends at index t+1.
+                        "comfort_target": np.array(
+                            [
+                                np.nan if v is None else float(v)
+                                for v in desired_temps_list[1:required_len]
+                            ],
+                            dtype=float,
+                        ),
+                        "comfort_penalty": (
+                            float(tank.get("penalty_factor", 10)) if desired_temps_list else 0.0
+                        ),
                     }
                 )
 
@@ -4973,6 +4985,8 @@ class Optimization:
                     backup_max_power=(backup["nominal_power"] / 1000.0 if backup else 0.0),
                     backup_price=backup_price,
                     demand_kw=demand_kw,
+                    comfort_target=e.get("comfort_target"),
+                    comfort_penalty=e.get("comfort_penalty", 0.0),
                     mode=sense,
                     # Per-step: EMHASS tanks lose to outdoor, and the LP prices that
                     # loss per step - a horizon mean would misprice diurnal swings.

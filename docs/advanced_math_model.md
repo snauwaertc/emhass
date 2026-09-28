@@ -362,10 +362,12 @@ To recover the true optimum without abandoning the fast LP, EMHASS adds a post-s
 If the re-solve fails, times out or is infeasible (for example when demand outruns
 the DP's estimate), the original plan is kept. If the DP finds no feasible
 trajectory, the store is capped at the temperature its static COP is valid for
-(each step's curve supply minus the approach) and re-solved. The DP uses one
-minimum and maximum temperature for the whole horizon, does not see the soft
-`desired_temperature`, and ignores the store's `thermal_inertia`; the re-solve
-still enforces the bounds and the lag. The DP itself is not bound by the solver
+(each step's curve supply minus the approach) and re-solved. The DP prices the
+store's own `desired_temperature` shortfall as the solve does (`penalty_factor` per
+degree), so the ceiling leaves room to reach it; a coupled store's target is left to
+the re-solve. The DP uses one minimum and maximum temperature for the whole horizon
+and ignores the store's `thermal_inertia`; the re-solve still enforces the bounds
+and the lag. The DP itself is not bound by the solver
 time limit. Measured on x86 over 96 steps: about 14 s for a buffer with a coupled
 pool at the default grid, and about 60 s with the tank grid at its 200-state cap
 (the coupled grid is capped at 64 states); slower hardware takes longer.
