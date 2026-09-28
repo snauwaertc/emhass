@@ -15249,6 +15249,20 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         matching = [m for m in logs.output if "min_power" in m and "load 0" in m]
         self.assertEqual(len(matching), 1, logs.output)
 
+    def test_min_power_collision_not_repeated_by_relaxed_rescue(self):
+        """The relaxed-LP rescue rebuilds the thermal constraints; with the same
+        number of affected steps it must not repeat the build-time warning."""
+        from emhass.optimization import Optimization
+
+        with (
+            mock.patch.object(Optimization, "_needs_relaxed_retry", return_value=True),
+            self.assertLogs(level="WARNING") as logs,
+        ):
+            self._run_hp_curve_soft_comfort(max_thermal_power=15000, min_power=2000)
+        self.assertTrue(any("Optimization failed with status" in m for m in logs.output))
+        matching = [m for m in logs.output if "min_power" in m and "load 0" in m]
+        self.assertEqual(len(matching), 1, logs.output)
+
     def test_min_power_collision_rewarned_when_dp_changes_it(self):
         """After the DP, a changed number of affected steps is warned again, naming
         the refinement."""

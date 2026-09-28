@@ -861,8 +861,8 @@ def compile_heat_topology(topology: dict) -> dict:
             if not np.isfinite(thermal_cap_value) or thermal_cap_value <= 0:
                 raise ValueError(
                     f"heat_topology.sources[{src['id']}].max_thermal_power "
-                    "must be > 0 W; a non-positive ceiling permanently disables "
-                    "the source. Omit the key to leave it uncapped."
+                    f"must be a finite number > 0 W, got {_thermal_cap!r}; omit the "
+                    "key to leave the source uncapped."
                 )
             source_block["max_thermal_power"] = thermal_cap_value
         # Optional per-source soft threshold: with the storage's

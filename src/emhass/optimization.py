@@ -4083,20 +4083,22 @@ class Optimization:
         ON level is min(nominal, cap/COP)) or continuous, so the source is dropped
         at those steps. That is physically right (the unit cannot modulate below
         its floor), but it must not happen silently: warn rather than lower the
-        floor. After the DP refinement the warning is repeated only when the
-        number of affected steps changed. Returns that number.
+        floor. After the DP refinement, or in the relaxed-LP rebuild, the warning
+        is repeated only when the number of affected steps changed. Returns that
+        number.
         """
         cap_over_cop = float(thermal_cap) / np.maximum(np.asarray(cop_vals, dtype=float), 1e-9)
         min_powers = self.optim_conf.get("minimum_power_of_deferrable_loads") or []
         min_power_k = float(min_powers[k]) if k < len(min_powers) and min_powers[k] else 0.0
         below_min = int(np.count_nonzero(cap_over_cop < min_power_k)) if min_power_k > 0 else 0
         counts = self.__dict__.setdefault("_capped_below_min_counts", {})
-        if after_dp and counts.get(k) == below_min:
+        repeat = after_dp or getattr(self, "_relaxed_rebuild", False)
+        if repeat and counts.get(k) == below_min:
             return below_min
         counts[k] = below_min
         if below_min > 0:
             self.logger.warning(
-                "Shared tank '%s': load %s cannot run at %s/%s steps%s; its "
+                "Shared tank '%s': deferrable load %s cannot run at %s/%s steps%s; its "
                 "min_power (%s W) exceeds the level max_thermal_power allows "
                 "(cap/COP), so those steps are forced off.",
                 tank_id,
@@ -7381,6 +7383,7 @@ class Optimization:
             # config change). The rebuilt thermal artifacts go into the LOCALS
             # used by this run's extraction; the instance attributes keep the
             # build-time artifacts paired with the cached problem (issue #1048).
+            self._relaxed_rebuild = True
             predicted_temps, heating_demands, penalty_terms_total, q_inputs = (
                 self._add_deferrable_load_constraints(
                     constraints_relaxed,
@@ -7426,6 +7429,7 @@ class Optimization:
                 self.logger.error(f"Relaxed optimization crashed: {e}")
 
             # 5. Restore Configuration
+            self._relaxed_rebuild = False
             self.optim_conf["treat_deferrable_load_as_semi_cont"] = original_semi_cont
             self.optim_conf["set_deferrable_load_single_constant"] = original_single_const
 
