@@ -95,7 +95,7 @@ the docs:
   static plan is published; that test fails without the re-solve's incumbent
   check. The check itself is unit-tested on HiGHS reports and on a direct
   constraint check.
-- Full suite: 1407 passed, 1 skipped, 32 xfailed. Two tests that fetch live
+- Full suite: 1409 passed, 1 skipped, 32 xfailed. Two tests that fetch live
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.

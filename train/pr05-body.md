@@ -109,5 +109,5 @@ configurations: byte-identical result DataFrames.
 - Every regression test fails without its fix and passes with it (checked
   before the review-round fixes were squashed; the DP module's own tests are
   new code); every commit passes the full suite.
-- Full suite: 1370 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on the base there. Sphinx build: no warnings on the changed pages.
+- Full suite: 1372 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on the base there. Sphinx build: no warnings on the changed pages.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.

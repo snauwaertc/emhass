@@ -74,7 +74,7 @@ are unchanged too.
   runtime parameter parsing, known-key list, the no-lag log): 9 of 10 fail on
   the base, all pass with the change. The one that passes on the base checks
   that no `prior_heat` gives the current behaviour.
-- Full suite: 1392 passed, 1 skipped, 32 xfailed. Two tests that fetch live
+- Full suite: 1394 passed, 1 skipped, 32 xfailed. Two tests that fetch live
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
