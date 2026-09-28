@@ -13295,6 +13295,66 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         temps = res["predicted_temp_heater0"].to_numpy()
         self.assertGreaterEqual(temps[1:].min(), 45.0 - 0.01)
 
+    def _zone_with_inertia(self, start, floors=None):
+        """A building zone with a 1 h thermal_inertia (2 steps) and a heat pump."""
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [2.0] * 48
+        self._setup_single_hp(nominal=8000)
+        self.optim_conf["def_load_config"] = [{"thermal_source": {"efficiency": 3.0}}]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "house",
+                "load_ids": [0],
+                "thermal_mass": 8.0,
+                "loss_coefficient": 0.3,
+                "thermal_inertia": 1.0,
+                "start_temperature": start,
+                "min_temperatures": floors or [19.5] * 48,
+                "max_temperatures": [23.0] * 48,
+            }
+        ]
+        opt = self.create_optimization()
+        res = self._solve_default_inputs(opt)
+        return opt, res
+
+    def test_zone_with_inertia_on_its_floor_stays_feasible(self):
+        """Over the thermal_inertia dead zone no source heat arrives, so a zone that
+        sits on (or just below) its floor cools below it whatever the plan does. A
+        hard floor there made every such run infeasible; it is priced instead, and
+        the floor holds again once heat can arrive."""
+        for start in (19.2, 19.5, 19.8):
+            with self.subTest(start=start):
+                opt, res = self._zone_with_inertia(start)
+                self.assertEqual(opt.optim_status, "Optimal")
+                temps = res["predicted_temp_heater0"].to_numpy()
+                self.assertGreaterEqual(temps[3:].min(), 19.5 - 0.01)
+
+    def test_later_floor_step_up_stays_hard(self):
+        """A floor that steps up later in the horizon (a scheduled legionella
+        cycle) is reachable by planning ahead: it is not softened and is met."""
+        floors = [45.0] * 8 + [55.0] * 40
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [10.0] * 48
+        self._setup_single_hp(nominal=5000)
+        self.optim_conf["def_load_config"] = [{"thermal_source": {"efficiency": 3.0}}]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "dhw",
+                "load_ids": [0],
+                "volume": 0.2,
+                "start_temperature": 45.0,
+                "thermal_loss": 0.05,
+                "min_temperatures": floors,
+                "max_temperatures": [65.0] * 48,
+            }
+        ]
+        opt = self.create_optimization()
+        with mock.patch.object(opt.logger, "info") as info:
+            res = self._solve_default_inputs(opt)
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertFalse(any("floor is soft" in str(c) for c in info.call_args_list))
+        self.assertGreaterEqual(res["predicted_temp_heater0"].to_numpy()[8:].min(), 55.0 - 0.01)
+
     def test_shared_tank_start_below_floor_recovers_gracefully(self):
         """A shared tank whose live start temperature is BELOW its hard minimum
         (a momentary out-of-band sensor read - e.g. a heating zone dipping under

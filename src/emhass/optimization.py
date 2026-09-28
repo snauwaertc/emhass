@@ -4388,9 +4388,14 @@ class Optimization:
         # full once the ramp line overtakes it. Index 0 is the pinned live start and
         # is never bounded (see _add_temp_bound), so only the constrained floors at
         # t >= 1 drive the trigger - a setback floor that rises only at t >= 1 (where
-        # min_temperatures[0] may sit below the start) is caught too.
+        # min_temperatures[0] may sit below the start) is caught too. Only near-term
+        # floors (the first SHARED_TANK_START_RECOVERY_STEPS steps) trigger it: a
+        # floor that steps up later (e.g. a scheduled legionella cycle) can be
+        # reached by planning ahead and stays hard.
         constrained_floors = [
-            v for t, v in enumerate(min_temperatures_list) if t >= 1 and v is not None
+            v
+            for t, v in enumerate(min_temperatures_list)
+            if 1 <= t <= SHARED_TANK_START_RECOVERY_STEPS and v is not None
         ]
         max_deficit = max((v - start_temperature for v in constrained_floors), default=0.0)
         recovery_idx, recovery_floor = [], []
@@ -4421,6 +4426,21 @@ class Optimization:
                     max_deficit,
                     recovery_idx[-1],
                 )
+
+        # Thermal-inertia dead zone: over the first L steps no source heat arrives,
+        # so the temperature there does not depend on this run's source decisions.
+        # A hard floor at those steps would make a zone that sits on its floor
+        # (where the optimizer parks it) infeasible on the next run; price the
+        # shortfall instead, like the recovery window above.
+        if L > 0:
+            min_temperatures_list = list(min_temperatures_list)
+            recovered = set(recovery_idx)
+            for t in range(1, min(L, required_len - 1) + 1):
+                if t < len(min_temperatures_list) and min_temperatures_list[t] is not None:
+                    if t not in recovered:
+                        recovery_idx.append(t)
+                        recovery_floor.append(min_temperatures_list[t])
+                    min_temperatures_list[t] = None
 
         # Hard min/max temperature bounds (shared helper; index 0 already pinned).
         self._add_temp_bound(
