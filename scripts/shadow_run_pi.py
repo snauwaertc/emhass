@@ -220,13 +220,19 @@ async def main():
         res.to_csv(dump)
         print(f"  (full result written to {dump})")
     # Loads, in flow order: 0 hp->buffer, 1 hp->dhw, 2 gas->buffer, 3 gas->dhw
+    # (gas-only: 0 gas->buffer, 1 gas->dhw)
     cols = {c.lower(): c for c in res.columns}
 
     def series(name):
         return res[cols[name.lower()]].to_numpy() if name.lower() in cols else np.zeros(N)
 
-    hp_buf, hp_dhw = series("P_deferrable0"), series("P_deferrable1")
-    gas_buf, gas_dhw = series("P_deferrable2"), series("P_deferrable3")
+    if os.environ.get("EMHASS_GAS_ONLY"):
+        # Without the heat pump the loads are 0 gas->buffer, 1 gas->dhw.
+        hp_buf = hp_dhw = np.zeros(N)
+        gas_buf, gas_dhw = series("P_deferrable0"), series("P_deferrable1")
+    else:
+        hp_buf, hp_dhw = series("P_deferrable0"), series("P_deferrable1")
+        gas_buf, gas_dhw = series("P_deferrable2"), series("P_deferrable3")
     # Temperature columns are named predicted_temp_heater{load_idx}, not by tank id;
     # match each tank to the column whose first value matches its start temperature
     # (dhw 50, buffer 38, pool 26, house 20 are all distinct).

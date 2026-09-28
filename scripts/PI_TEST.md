@@ -10,13 +10,32 @@ On the Pi, in the checkout you use for the fork:
 ```bash
 git fetch origin
 git switch -c pi/train-final --track origin/pi/train-final   # first time
-# git switch pi/train-final && git pull                        # later updates
+# later updates: the branch is rebuilt (force-pushed), so do not pull, reset:
+# git switch pi/train-final && git fetch origin && git reset --hard origin/pi/train-final
 uv sync
 .venv/bin/python scripts/shadow_run_pi.py                 # 24 h, cop_solver from config (static)
 .venv/bin/python scripts/shadow_run_pi.py 48 180 auto     # 24 h, 180 s limit, DP COP refinement
 EMHASS_GAS_ONLY=1 .venv/bin/python scripts/shadow_run_pi.py   # today's gas-only setup
 EMHASS_DUMP_CSV=/tmp/shadow.csv .venv/bin/python scripts/shadow_run_pi.py   # full result
+.venv/bin/python scripts/shadow_run_pi.py 96                  # 48 h horizon
 ```
+
+`git reset --hard` discards local changes in that checkout; keep your own
+config outside it (or commit it on another branch) first.
+
+Reference results from the sandbox (x86, same script, 24 h unless noted), to
+compare with the Pi:
+
+| Run | optim_status | HP elec | gas input | Wall time |
+|---|---|---|---|---|
+| `static` (default) | Optimal | 32.6 kWh | 2.4 kWh | 9 s |
+| `48 180 auto` | Optimal | 27.2 kWh | 11.7 kWh | 53 s |
+| `96` (48 h, static) | Optimal (Incumbent) | 56.7 kWh | 2.4 kWh | 48 s |
+| `EMHASS_GAS_ONLY=1` | Optimal | - | 134.2 kWh | 7 s |
+
+The `auto` run is known to plan the house below its target for longer than
+`static` (the DP re-solve is held close to the DP's buffer trajectory); see the
+open question in the train README before judging it.
 
 Arguments: `[horizon steps] [lp_solver_timeout s] [cop_solver] [mip_rel_gap]
 [gas startup penalty] [gas max_startups]`.
