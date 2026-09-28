@@ -29,13 +29,16 @@ compare with the Pi:
 | Run | optim_status | HP elec | gas input | Wall time |
 |---|---|---|---|---|
 | `static` (default) | Optimal | 32.6 kWh | 2.4 kWh | 9 s |
-| `48 180 auto` | Optimal | 27.2 kWh | 11.7 kWh | 53 s |
-| `96` (48 h, static) | Optimal (Incumbent) | 56.7 kWh | 2.4 kWh | 48 s |
+| `48 180 auto` | Optimal | 28.3 kWh | 5.4 kWh | 10 s |
+| `96` (48 h, static) | Optimal (Incumbent) | 56.7 kWh | 2.4 kWh | 47 s |
+| `96 180 auto` (48 h) | Optimal | 49.4 kWh | 5.4 kWh | 57 s |
 | `EMHASS_GAS_ONLY=1` | Optimal | - | 134.2 kWh | 7 s |
 
-The `auto` run is known to plan the house below its target for longer than
-`static` (the DP re-solve is held close to the DP's buffer trajectory); see the
-open question in the train README before judging it.
+Re-costed with the COP at the temperatures each plan reaches, the 24 h plans
+cost 5.12 (`static`) and 5.55 (`auto`): on this topology the DP refinement
+does not pay off, so keep `cop_solver: static` and run `auto` only to compare.
+Both keep the house in its band and the DHW tank at or below the heat pump's
+55 C (gas covers anything above).
 
 Arguments: `[horizon steps] [lp_solver_timeout s] [cop_solver] [mip_rel_gap]
 [gas startup penalty] [gas max_startups]`.
