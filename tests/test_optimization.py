@@ -14468,10 +14468,21 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         log = "\n".join(cm.output)
         # The re-solve must actually have been rejected (otherwise the path is untested).
         self.assertIn("keeping static solve", log)
-        # ...and the published plan must be intact, not nulled by the rejected re-solve.
-        self.assertTrue(res["P_grid"].notna().all(), "rejected re-solve nulled the plan")
-        buf_col = next(c for c in res.columns if "predicted_temp_heater" in c)
-        self.assertTrue(np.isfinite(res[buf_col].to_numpy()).all())
+        # ...and the published plan must be the static plan, not a nulled (all-zero)
+        # one left behind by the rejected re-solve.
+        self.optim_conf["cop_solver"] = "static"
+        static_opt = self.create_optimization()
+        static_res = static_opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            np.full(48, 0.10),
+            np.full(48, 0.02),
+        )
+        self.assertGreater(res["P_deferrable0"].sum(), 0.0)
+        np.testing.assert_allclose(
+            res["P_deferrable0"].to_numpy(), static_res["P_deferrable0"].to_numpy(), atol=1e-3
+        )
 
     def test_dp_refinement_never_replaces_the_cached_problem(self):
         """An accepted DP re-solve must be handed to the extraction (solved_prob)
