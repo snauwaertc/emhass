@@ -873,10 +873,33 @@ def compile_heat_topology(topology: dict) -> dict:
                 "profile, building_demand, pool_comfort"
             )
 
+    def _positive(value, field):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = float("nan")
+        if not np.isfinite(number) or number <= 0:
+            raise ValueError(f"heat_topology.{field} must be a positive number, got {value!r}")
+        return number
+
     # Build shared_thermal_tanks from storage + aggregated demand + flows
     shared_tanks = []
     for s in storage:
         sid = s["id"]
+        # Heat capacity: a water volume (with density and heat capacity) or a
+        # thermal_mass. Checked here so an unusable storage is rejected when the
+        # configuration is saved, not at the next unattended run.
+        if s.get("thermal_mass") is not None:
+            _positive(s["thermal_mass"], f"storage[{sid}].thermal_mass")
+        elif s.get("volume") is not None:
+            _positive(s["volume"], f"storage[{sid}].volume")
+            for _cap_key in ("density", "heat_capacity"):
+                if s.get(_cap_key) is not None:
+                    _positive(s[_cap_key], f"storage[{sid}].{_cap_key}")
+        else:
+            raise ValueError(
+                f"heat_topology.storage[{sid}] needs a 'volume' (m3) or a 'thermal_mass' (kWh/K)"
+            )
         load_ids = [flow_to_load_idx[(f["from"], f["to"])] for f in source_flows if f["to"] == sid]
         tank: dict = {
             "id": sid,
@@ -1019,8 +1042,14 @@ def compile_heat_topology(topology: dict) -> dict:
             {
                 "from": f["from"],
                 "to": f["to"],
-                "transfer_coefficient": float(f.get("transfer_coefficient", 1.0)),
-                "max_transfer_power": float(f.get("max_transfer_power", 1e6)),
+                "transfer_coefficient": _positive(
+                    f.get("transfer_coefficient", 1.0),
+                    f"flows[{f['from']}->{f['to']}].transfer_coefficient",
+                ),
+                "max_transfer_power": _positive(
+                    f.get("max_transfer_power", 1e6),
+                    f"flows[{f['from']}->{f['to']}].max_transfer_power",
+                ),
             }
         )
 

@@ -1719,6 +1719,49 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["def_minimum_on_time"], [3] * original_num + [0, 0])
         self.assertEqual(out["def_minimum_off_time"], [2] * original_num + [0, 0])
 
+    def test_compile_heat_topology_rejects_unusable_storage_and_transfers(self):
+        """A storage without volume or thermal_mass, a non-positive capacity, or a
+        non-positive transfer field is rejected by the compiler (so the config save
+        refuses it), not at the next optimization run."""
+
+        def topo(storage_extra=None, transfer_extra=None):
+            house = {
+                "id": "house",
+                "thermal_mass": 8,
+                "loss_coefficient": 0.25,
+                "start_temperature": 20,
+                "min_temperature": [19] * 4,
+                "max_temperature": [22] * 4,
+            }
+            buffer = {
+                "id": "buffer",
+                "volume": 0.3,
+                "start_temperature": 40,
+                "min_temperature": [30] * 4,
+                "max_temperature": [55] * 4,
+            }
+            buffer.update(storage_extra or {})
+            transfer = {"from": "buffer", "to": "house", **(transfer_extra or {})}
+            return {
+                "sources": [
+                    {"id": "e", "type": "electric", "efficiency": 1.0, "nominal_power": 3000}
+                ],
+                "storage": [buffer, house],
+                "flows": [{"from": "e", "to": "buffer"}, transfer],
+            }
+
+        utils.compile_heat_topology(topo())  # the valid baseline compiles
+        for storage_extra, transfer_extra, field in (
+            ({"volume": None}, None, "volume"),
+            ({"volume": -0.1}, None, "volume"),
+            ({"heat_capacity": 0}, None, "heat_capacity"),
+            (None, {"max_transfer_power": -5}, "max_transfer_power"),
+            (None, {"transfer_coefficient": float("nan")}, "transfer_coefficient"),
+        ):
+            with self.subTest(field=field, storage=storage_extra, transfer=transfer_extra):
+                with self.assertRaisesRegex(ValueError, field):
+                    utils.compile_heat_topology(topo(storage_extra, transfer_extra))
+
     def test_compile_heat_topology_rejects_wrong_types(self):
         """Wrong top-level types raise the documented ValueError instead of an
         AttributeError, and a string extend flag is not treated as true."""
