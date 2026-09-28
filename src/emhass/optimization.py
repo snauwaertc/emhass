@@ -5272,8 +5272,8 @@ class Optimization:
             )
             # Accept with EXACTLY the main path's policy (shared predicate): any
             # result the main path would discard for the relaxed fallback
-            # (infeasible, unbounded, time-limited, no value) restores the static
-            # solve instead.
+            # (infeasible, unbounded, no value, or time-limited without a feasible
+            # solution) restores the static solve instead.
             if self._accept_dp_resolve(
                 prob2.status,
                 prob2.value,
@@ -6250,12 +6250,12 @@ class Optimization:
         """
         if prob is None or getattr(prob, "value", None) is None:
             return False
-        stats = getattr(prob, "solver_stats", None)
-        extra = getattr(stats, "extra_stats", None)
-        primal_status = getattr(extra, "primal_solution_status", None)
-        if primal_status is not None:
-            return int(primal_status) == 2
         try:
+            stats = getattr(prob, "solver_stats", None)
+            extra = getattr(stats, "extra_stats", None)
+            primal_status = getattr(extra, "primal_solution_status", None)
+            if primal_status is not None:
+                return int(primal_status) == 2
             for constraint in prob.constraints:
                 violation = constraint.violation()
                 if violation is None:
@@ -6302,8 +6302,8 @@ class Optimization:
         wall clock on exactly the hard problems that hit the limit. Half the
         budget (floor 10 s) applies to each solver's own limit option: HiGHS
         ``time_limit``, Gurobi ``TimeLimit`` and CPLEX ``cplex_params['timelimit']``.
-        A re-solve that times out is rejected by ``_accept_dp_resolve`` and the
-        static solve is kept. Returns a copy - never mutates the input.
+        A re-solve that times out without a feasible solution is rejected by
+        ``_accept_dp_resolve`` and the static solve is kept. Returns a copy - never mutates the input.
         """
 
         def half(value):
@@ -7584,10 +7584,13 @@ class Optimization:
                 else:
                     params.pop("q_input_var", None)
         elif solved_prob.status == "user_limit":
+            extra = getattr(getattr(solved_prob, "solver_stats", None), "extra_stats", None)
+            gap = getattr(extra, "mip_gap", None)
             self.logger.info(
-                "Accepting time-limited solution (objective %.4g) - feasible incumbent, "
-                "skipping the relaxed LP fallback.",
+                "Accepting time-limited solution (objective %.4g, MIP gap %s) - feasible "
+                "incumbent, skipping the relaxed LP fallback.",
                 solved_prob.value,
+                f"{gap:.2%}" if isinstance(gap, int | float) and np.isfinite(gap) else "unknown",
             )
             # Mark it so the downstream status gate keeps this binary-respecting
             # incumbent instead of discarding it.

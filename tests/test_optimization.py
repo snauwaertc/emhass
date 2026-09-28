@@ -15579,15 +15579,16 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         """With a time limit too short to find any solution, HiGHS returns
         user_limit with value 0.0 and all variables at 0. That must not be
         published as 'Optimal (Incumbent)' (an all-zero plan reported as ok); it
-        goes to the relaxed fallback instead."""
+        goes to the relaxed fallback instead. With this limit the relaxed LP
+        times out too, so the run reports the time-out and publishes no plan."""
         self.df_input_data_dayahead = self.prepare_forecast_data()
         self.optim_conf["lp_solver_timeout"] = 1e-6
         opt = self.create_optimization()
-        res = self._solve_default_inputs(opt)
-        self.assertNotEqual(opt.optim_status, "Optimal (Incumbent)")
-        if opt.optim_status == "Optimal (Relaxed)":
-            # A published plan must serve the house load: not the all-zero time-out.
-            self.assertGreater(float(res["P_grid"].abs().sum()), 0.0)
+        with self.assertLogs(logger, level="WARNING") as logs:
+            res = self._solve_default_inputs(opt)
+        self.assertTrue(any("Retrying with" in line for line in logs.output), logs.output)
+        self.assertEqual(opt.optim_status, "User_Limit")
+        self.assertNotIn("P_grid", res.columns)
 
     def test_mutual_exclusion_survives_forced_relaxed_fallback(self):
         """The relaxed fallback keeps mutual_exclusion: two semi-continuous loads
@@ -15616,16 +15617,49 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         both = (res["P_deferrable0"] > 1.0) & (res["P_deferrable1"] > 1.0)
         self.assertFalse(both.any(), "mutual exclusion dropped in the relaxed fallback")
 
+    def test_dp_resolve_time_out_without_incumbent_keeps_static_plan(self):
+        """A DP re-solve that hits its time limit before finding any solution
+        returns user_limit with every variable at 0. It must be rejected and the
+        static plan published, not the all-zero re-solve."""
+        self._dp_refinable_setup()
+        self.optim_conf["cop_solver"] = "static"
+        opt_static = self.create_optimization()
+        res_static = self._solve_default_inputs(opt_static)
+
+        halve = Optimization._dp_resolve_opts
+        with (
+            mock.patch.object(
+                Optimization,
+                "_dp_resolve_opts",
+                staticmethod(lambda opts: {**halve(opts), "time_limit": 1e-6}),
+            ),
+            self.assertLogs(logger, level="WARNING") as logs,
+        ):
+            opt = self._dp_refinable_setup()
+            res = self._solve_default_inputs(opt)
+        self.assertTrue(
+            any("re-solve status user_limit; keeping static solve" in m for m in logs.output),
+            logs.output,
+        )
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertGreater(res["P_deferrable0"].sum(), 0.0)
+        np.testing.assert_allclose(
+            res["P_deferrable0"].sum(), res_static["P_deferrable0"].sum(), rtol=1e-3
+        )
+
     def test_dp_refined_time_limited_resolve_publishes_incumbent(self):
         """When the accepted DP re-solve is itself time-limited (user_limit with a
         feasible incumbent), the incumbent marking must apply to the problem the
         extraction reads - the refined one - so it publishes as
-        'Optimal (Incumbent)' rather than being discarded as a raw user_limit."""
+        'Optimal (Incumbent)' rather than being discarded as a raw user_limit.
+        The log names the remaining MIP gap."""
+        from types import SimpleNamespace
 
         class FakeRefined:
             def __init__(self):
                 self._status = "user_limit"
                 self.value = -12.5
+                self.solver_stats = SimpleNamespace(extra_stats=SimpleNamespace(mip_gap=0.034))
 
             @property
             def status(self):
@@ -15633,14 +15667,16 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
 
         opt = self._dp_refinable_setup()
         opt._refine_cop_with_dp = lambda *a, **k: FakeRefined()
-        opt.perform_optimization(
-            self.df_input_data_dayahead,
-            self.p_pv_forecast.values.ravel(),
-            self.p_load_forecast.values.ravel(),
-            self.df_input_data_dayahead[opt.var_load_cost].values,
-            self.df_input_data_dayahead[opt.var_prod_price].values,
-        )
+        with self.assertLogs(logger, level="INFO") as logs:
+            opt.perform_optimization(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast.values.ravel(),
+                self.p_load_forecast.values.ravel(),
+                self.df_input_data_dayahead[opt.var_load_cost].values,
+                self.df_input_data_dayahead[opt.var_prod_price].values,
+            )
         self.assertEqual(opt.optim_status, "Optimal (Incumbent)")
+        self.assertTrue(any("MIP gap 3.40%" in line for line in logs.output), logs.output)
 
 
 if __name__ == "__main__":
