@@ -28,8 +28,9 @@ Stacked on <link to PR 5>; the diff below is only this PR's.
   the cap, the source cannot run at those steps: for a semi-continuous source
   `p >= min_power * bin` collides with the lowered ON level, for a continuous
   one with `COP * p <= cap`. The solve still succeeds, and a warning names the
-  source and the number of affected steps. After the DP re-derives the ON level
-  it warns again only if that number changed.
+  deferrable load and the number of affected steps. After the DP re-derives the
+  ON level, or when the relaxed rescue rebuilds the constraints, it warns again
+  only if that number changed.
 - The compiler rejects a non-positive, NaN, infinite or non-numeric
   `max_thermal_power`.
 
@@ -37,7 +38,9 @@ Stacked on <link to PR 5>; the diff below is only this PR's.
 
 - `heat_topology.md`: the `max_thermal_power` field and a
   **Per-source thermal-output ceiling** section (why, example, ON-level
-  semantics, the `min_power` collision warning).
+  semantics, the `min_power` collision warning). The source table and the
+  flow-group section say that a semi-continuous source runs at its ON level,
+  which is lower than `nominal_power` where the cap binds.
 
 ### Users without temperature management
 
@@ -49,6 +52,9 @@ byte-identical result DataFrames.
 ### Verification
 
 - Every commit with tests: red on the base, green with the change.
+- The DP re-derivation of the ON level is covered: a capped heat pump on a tank
+  kept cool (the refined COP is above the static one at every step) is
+  abandoned with an Optimal status without it, and runs with it.
 - Full suite: 1353 passed, 1 skipped, 32 xfailed. Two tests that fetch live
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.

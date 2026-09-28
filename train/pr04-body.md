@@ -21,15 +21,16 @@ Stacked on <link to PR 3>; the diff below is only this PR's.
 **Refactor note.** The per-step bound, overshoot indicator and comfort penalty
 were implemented three times (thermal_config, thermal_battery, shared tank).
 They are extracted into `_add_temp_bound`, `_overshoot_indicator` and
-`_comfort_penalty`. The shared-tank path uses all three; thermal_config and
-thermal_battery use the overshoot and penalty helpers and keep their hard
+`_comfort_penalty`. The shared-tank and thermal_config paths use all three;
+thermal_battery uses the overshoot and penalty helpers and keeps its hard
 bounds inline. This is behaviour-preserving:
 no existing test is changed, and plans without thermal loads are
 byte-identical. I know `optimization.py` restructurings normally need an issue
 first; the extraction is limited to these three helpers, which the new storage
 features need anyway. I can split it into its own PR if you prefer.
 
-**Recovery window.** When a storage starts below a near-term floor, the hard
+**Recovery window.** When a storage starts below a near-term floor (one of the
+first 6 steps; a floor that steps up later stays hard), the hard
 floor is ramped up from the start temperature (at most 0.5 C per step, over at
 least 6 steps), and every degree below the configured floor inside that window
 is priced with a weight that dominates energy prices. A storage that can
@@ -37,7 +38,19 @@ recover in one step therefore still does (the plan is the same as before); one
 that cannot follows the ramp instead of making the problem infeasible. The
 three values are module-level constants (`SHARED_TANK_START_RECOVERY_STEPS`,
 `SHARED_TANK_START_RECOVERY_RATE`, `SHARED_TANK_START_RECOVERY_PENALTY`) and
-are design choices.
+are design choices. The penalty weight is per degree per step in the
+objective's currency, so with very high electricity prices it may no longer
+dominate.
+
+**Thermal-inertia dead zone.** Over the first `L` steps of a storage with
+`thermal_inertia`, no source heat arrives, so a hard floor there made a zone
+that sits on its floor infeasible on the next run. Those floors are priced
+instead. On a storage fed only by transfers the lag has no effect (transfers
+are not lagged), so it is ignored with a warning.
+
+**Validation at save time.** With `volume` now optional, the compiler checks
+that each storage has a positive `volume` or `thermal_mass`, and that transfer
+fields are positive, so an unusable topology is refused when it is saved.
 
 ### Fixes to the new code in this PR
 
@@ -50,6 +63,8 @@ are design choices.
   it is now rejected.
 - `tank_transfers` from a previous compile were kept or duplicated on re-merge;
   they are now replaced.
+- A transfer is also limited by the temperatures at the end of the step, so a
+  step can no longer leave the receiver hotter than its feeder.
 - After a relaxed rescue, `P_transfer_*` is read from the problem that was
   solved (it was published as zeros), and the transfer variables are restored
   afterwards, so a reused problem does not publish a frozen pump schedule.

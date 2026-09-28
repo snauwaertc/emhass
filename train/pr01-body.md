@@ -18,12 +18,12 @@ on a live install and by a 20-day rolling-MPC replay against measured data
 | building_demand gains | a shared tank using the building physics model ignored `window_area` / `shgc` / `internal_gains_factor` (the compiler folds them onto the tank, the physics call never passed them) | planned heating 1.8-2.2x measured in the #539 replay |
 | def_current_power pin | shared-tank members (`thermal_source`) were not treated as thermal loads by the step-0 power pin | a continuous heat pump on a shared tank had its t=0 power hard-pinned; the run could go Infeasible |
 | predicted temperature publish | `_publish_thermal_loads` skipped `thermal_source` loads | `custom_predicted_temperature_id` published nothing for heat_topology configs |
-| default publish ids | the default per-load entity lists were built from the configured load count, before a heat_topology compile or a runtime `def_load_config` raises it | publish-data raised `IndexError` for a topology with more flows than configured loads, unless every id was passed |
+| publish ids | the default per-load entity lists were built from the configured load count, before a heat_topology compile or a runtime `def_load_config` raises it; a caller's list shorter than the load count was not padded either | publish-data raised `IndexError`: for a topology with more flows than configured loads, or for any short `custom_*_id` list. Now missing entries get the default names, with a warning when the list came from the caller |
 | open-meteo fail-soft | on a cold start, a failed open-meteo request returned `None` and crashed with a `TypeError` the #997 fail-soft guard does not catch | an offline `list`-method setup with a thermal load crashed instead of planning without solar gains |
 | open-meteo weather for heat_topology | `_list_method_needs_weather` only recognised `thermal_config` / `thermal_battery` | `list`-method setups with heat_topology computed every curve COP against the constant 15 C fallback |
 | null `min_temperatures` entry | `np.maximum` propagates the NaN of a null static entry | the weather-compensated curve floor was dropped for exactly the slots marked curve-only |
 | `def_minimum_on/off_time` normalisation | not routed through `check_def_loads` like the sibling per-load arrays | a `null` entry (e.g. `[3, null]` from a partial set-config) stopped the run with `Invalid def_minimum_on_time value at index 1: None` |
-| config diagnostics | `min_power > nominal_power` not rejected by the topology compiler; `thermal_battery` without a demand model raised a bare `KeyError`; `thermal_inertia` missing from the #943 unknown-key allow-list | generic Infeasible far from the mistake; unhelpful stack trace; a false "unknown key is ignored" warning |
+| config diagnostics | `min_power > nominal_power` not rejected by the topology compiler; `thermal_battery` without a demand model raised a bare `KeyError`; `thermal_inertia` missing from the #943 unknown-key allow-list | the source silently never ran (or the run was Infeasible when its heat was needed); such a topology now stops with a field-naming error. Unhelpful stack trace; a false "unknown key is ignored" warning |
 | thermal_inertia at the horizon | the per-load lag had no upper bound | `thermal_inertia` at or past the horizon crashed the build with `ValueError: Invalid dimensions (0,)` |
 | solcast test isolation | three solcast mock tests used the machine-global daily quota counter | they fail after 8 solcast fetches on the same machine and day (repeated local runs, reused runners) |
 | shared-tank two-source test | the test built an infeasible MILP and passed against the relaxed-LP fallback | the test guarded nothing |
@@ -58,10 +58,12 @@ Nothing here changes a plan for a setup without thermal loads. Verified A/B
 against current master with six non-thermal configurations (defaults,
 battery, semi-continuous loads with min on/off time, three loads with short
 per-load arrays, `def_current_power`, single-constant loads): the result
-DataFrames are **byte-identical**. The two changes such users can notice are
-both error paths: a `null` in `def_minimum_on_time` / `def_minimum_off_time`
+DataFrames are **byte-identical**. The changes such users can notice are
+all on error paths: a `null` in `def_minimum_on_time` / `def_minimum_off_time`
 now means 0 instead of stopping the run, and an Open-Meteo cold-start failure
-now fails with a readable `ValueError` instead of a `TypeError`.
+now fails with a readable `ValueError` instead of a `TypeError`, and a
+`custom_*_id` list shorter than the load count publishes the missing loads
+under their default names with a warning, instead of raising `IndexError`.
 
 Smaller side effects of the fixes, for completeness:
 
@@ -72,7 +74,7 @@ Smaller side effects of the fixes, for completeness:
   model).
 - The building_demand gains are part of the problem when it is built. With the
   warm-start cache a reused problem keeps the first run's gains, the same way
-  it already keeps the outdoor temperature; the next PR bypasses the cache for
+  it already keeps the outdoor temperature; <link to PR 2> bypasses the cache for
   shared tanks.
 
 ### Not in this PR (on purpose)
@@ -87,5 +89,5 @@ Smaller side effects of the fixes, for completeness:
 ### Verification
 
 - Every regression test: red on master, green with its fix.
-- Full suite on this branch: 1244 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on master there and are untouched by this PR.
+- Full suite on this branch: 1247 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on master there and are untouched by this PR.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.

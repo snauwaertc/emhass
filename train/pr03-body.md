@@ -24,10 +24,11 @@ Existing shared-tank behaviour that changes:
 
 - **Tank-level `overshoot_temperature`:** each source now gets its own
   indicator (so it can take a per-source threshold), and big-M is sized from
-  the tank's bounds instead of a fixed 100. A source is still switched off while
-  the tank is above the threshold at the start of a step, as before, for
-  continuous and semi-continuous sources alike. The upstream soft-comfort tests
-  pass unchanged.
+  the tank's bounds instead of a fixed 100. A semi-continuous source is still
+  switched off while the tank is above the threshold at the start of a step, as
+  before. A continuous source is blocked only in a step that would end above it,
+  so it can heat up to the threshold and can heat from a start above it when the
+  floor needs it. The upstream soft-comfort tests pass unchanged.
 - **Combi tanks:** without `indoor_target_temperature`, the building demand of a
   tank that also has a draw-off profile is computed against 20 C, not the tank's
   hot-water floor.
@@ -40,8 +41,12 @@ Existing shared-tank behaviour that changes:
   so this only matters if that bypass is lifted later.
 - **Validation:** `heat_topology` with a wrong top-level type (for example
   `"flows": "x"`) or a non-boolean `extend_deferrable_loads` is rejected with a
-  field-naming `ValueError` (before: HTTP 500 on save, and `"false"` enabled
-  extend mode).
+  field-naming `ValueError`, and a malformed entry inside a list returns the 400
+  validation message (before: HTTP 500 on save, and `"false"` enabled extend
+  mode).
+- **Anti-cycling on continuous sources:** `startup_penalty` / `max_startups`
+  only bind for semi-continuous sources or sources with `min_power`; the docs
+  say so.
 
 **Size.** This PR bundles eight features. If the maintainer prefers smaller
 reviews, it splits cleanly into four: (1) `max_supply_temperature` and its
@@ -71,8 +76,10 @@ tank sets it.
 
 ### Verification
 
-- Each feature commit has tests that fail on the base and pass with it,
-  including a semi-continuous source under an overshoot threshold; the two
+- Each feature commit has tests that fail on the base and pass with it. Some
+  tests guard against intermediate states of this PR rather than the base
+  (a semi-continuous source under an overshoot threshold, the combi-tank
+  default); the two
   end-to-end tests (runtime tanks, topology next to ordinary loads) are
   integration guards.
 - Existing tests: no optimization, utils, web-server or command-line test is

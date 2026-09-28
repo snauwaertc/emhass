@@ -6,8 +6,10 @@
 
 Stacked on <link to PR 7>. It also contains the `Optimal_Inaccurate` commit
 from <link to PR 1b> (identical patch), because the status reporting builds
-on the shared `OK_OPTIM_STATUSES`; if PR 1b is merged first, that commit
-drops out of the diff.
+on the shared `OK_OPTIM_STATUSES`. If PR 1b is merged first, I rebase this PR
+onto it: that commit drops out, and the status list and the `optim_status`
+row in `publish_data.md` get a small merge (PR 1b's later commits touch the
+same lines).
 
 ### 1. Mutual exclusion survives the relaxed fallback
 
@@ -32,7 +34,12 @@ HiGHS reports a feasible primal solution (`primal_solution_status == 2`); for
 other solvers the constraint violations are checked directly. Without that
 proof the run goes to the relaxed fallback, exactly as before. The DP COP
 re-solve uses the same shared predicate, and the relaxed problem (a MILP too,
-since it keeps the mutex binaries) may also use a feasible incumbent.
+since it keeps the mutex binaries) may also use a feasible incumbent. The log
+line of an accepted incumbent names the remaining MIP gap.
+
+cvxpy maps a Gurobi time limit to `user_limit` as well, so Gurobi gets the same
+treatment (its constraints are checked directly); only a CPLEX time limit comes
+back as `optimal_inaccurate`.
 
 ### 3. Every published plan is "ok" on the API
 
@@ -62,6 +69,7 @@ non-thermal configurations gives byte-identical result DataFrames.
 - `heat_topology.md`: mutual exclusion also holds in the fallback.
 - `advanced_math_model.md`, `config.md`: `lp_solver_timeout` and the
   incumbent.
+- `plan_output_schema.md`: which `optim_status` values come with a plan.
 
 ### Verification
 
@@ -69,10 +77,17 @@ non-thermal configurations gives byte-identical result DataFrames.
   base and passes. A forced fallback with a mutual-exclusion group of two
   semi-continuous loads never runs both (8 overlapping steps on the base). The
   max_supply_temperature gate is still checked in a forced relaxed fallback.
-- A real time-out without incumbent (`lp_solver_timeout` 1e-6, no mocks) is not
-  published as "Optimal (Incumbent)"; the incumbent check is unit-tested on
-  HiGHS reports and on a direct constraint check.
+- A real time-out without incumbent (`lp_solver_timeout` 1e-6, no mocks): the
+  relaxed LP times out too, the status is `User_Limit` and no plan is
+  published. A DP re-solve that times out before finding a solution (a real
+  HiGHS run with a 1e-6 s limit on the re-solve only) is rejected and the
+  static plan is published; that test fails without the re-solve's incumbent
+  check. The check itself is unit-tested on HiGHS reports and on a direct
+  constraint check.
 - Full suite: 1371 passed, 1 skipped, 32 xfailed. Two tests that fetch live
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
+
+The history carries fix-on-fix commits from review rounds; squash-merging is
+fine, or I can squash it into the three proposals before review.

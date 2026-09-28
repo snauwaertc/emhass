@@ -5,8 +5,8 @@ PR has a ready-to-paste body in this folder (`prNN-body.md`); issues have
 `issue-*.md`. Replace the `<link to ...>` placeholders with real numbers once the
 referenced PR or issue exists.
 
-Every PR was reviewed independently afterwards; the findings and what was done
-about each are in `reviews.md`. Every PR was checked the same way: each commit with tests is red on its base and
+Every PR was reviewed independently twice; the findings and what was done
+about each are in `reviews.md` (round 1) and `reviews-round2.md` (round 2). Every PR was checked the same way: each commit with tests is red on its base and
 green with the change; the full suite passes (apart from tests that need live
 open-meteo / an untouched Solcast day counter, which fail identically on master
 in the sandbox); `ruff check` and `ruff format --check` are clean; and an A/B
@@ -29,7 +29,7 @@ against master.
 | 9 | `pr/09-relaxed-fallback` | 7 (+1b) | keep mutex in the fallback, keep time-limited incumbents, report both as ok | after `issue-relaxed-fallback.md` is answered |
 | 10 | `pr/10-thermal-onboarding-docs` | 7 | which model to use, migration guide, hybrid walkthrough (tested example) | ready once 2-7 are in |
 
-PR 5 has 34 commits (the DP solver grew through review rounds, each with its
+PR 5 has 48 commits (the DP solver grew through review rounds, each with its
 own regression test); it reads well commit by commit, but squash-merging it is
 fine too.
 
@@ -62,9 +62,11 @@ these, so they can also be raised in the PR itself.
 
 ## What stays in the fork on purpose
 
-Compared function by function with the fork tip merged with current master,
-`utils.py`, `thermal_dp.py` and `web_server.py` are identical. The remaining
-differences are deliberate:
+After the first review round, the train and the fork tip merged with current
+master had identical `utils.py`, `thermal_dp.py` and `web_server.py`. The fixes
+from the second review round (`reviews-round2.md`) are only on these branches
+and on `pi/train-final`, so the train is now ahead of the fork. Apart from
+that, the differences are deliberate:
 
 - **Lag rounding** (`_resolve_lag_steps`): the fork rounds `thermal_inertia` to
   the nearest step; the train truncates on both paths until the lag issue is

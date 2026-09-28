@@ -7,7 +7,7 @@ example to bank surplus PV into a buffer, the MILP super-heats at an
 optimistic COP the real condenser cannot achieve. This PR adds an exact
 dynamic-programming (DP) refinement that checks the plan against the true
 temperature-dependent COP and, only when they disagree, re-solves with the
-corrected COP and a temperature ceiling derived from the DP's peak.
+corrected COP and a per-step temperature ceiling at the DP's trajectory.
 
 **It is off by default.** `cop_solver` defaults to `static`, which never runs
 the DP or re-solves. `auto` engages the DP only when the static solve is
@@ -22,7 +22,12 @@ Stacked on <link to PR 4>; the diff below is only this PR's.
   COP (`COP[t, T]`), a marginal price that drops to the export price during PV
   surplus, a bounded state count, and a cooling mode.
 - `Optimization._refine_cop_with_dp`: consistency check, DP, and a re-solve
-  with half of the solver's time limit (HiGHS, Gurobi or CPLEX). A re-solve that the main
+  with half of the solver's time limit (HiGHS, Gurobi or CPLEX), bounded per
+  step to 1 C above the DP's trajectory so the plan stays at the temperatures its
+  COP was priced for. The DP prices the tank's own `desired_temperatures`
+  shortfall (`penalty_factor` per degree) like the solve does; without it the
+  ceiling would hold a tank that starts below its target at the start
+  temperature. It does not run when the static solve failed. A re-solve that the main
   path's own acceptance rule would reject keeps the static plan. The refined
   problem is handed to the result extraction without replacing the cached
   problem (#1048), and the DP registry is restored after a relaxed rescue.
@@ -48,16 +53,20 @@ predicate instead of an inline list.
   the heat pump's COP is only held as a `cp.Parameter` when the refinement can
   run.
 - The DP models the tank with one minimum and maximum over the horizon and
-  without the soft `desired_temperatures`; the re-solve enforces both.
-- The DP's runtime is not bound by the solver time limit: about 3 s for a
-  buffer + pool over 96 steps on x86, up to about 27 s at the 200-state cap.
+  without `thermal_inertia`, and it does not see a coupled store's comfort
+  target; the re-solve enforces all of them. If demand outruns the DP's estimate, the
+  per-step ceiling makes the re-solve infeasible and the static plan is kept.
+- The DP's runtime is not bound by the solver time limit: about 14 s for a
+  buffer + pool over 96 steps on x86 at the default grid, about 60 s with the
+  tank grid at its 200-state cap (the coupled grid is capped at 64).
 - A coupled store's own draw-off or pool demand is not passed to the DP; only
-  its loss coefficient is.
+  its loss coefficient is. A non-coupled receiver without `loss_coefficient`
+  (e.g. a hot-water tank) passes its realised transfer.
 - Design question: the consistency check uses the absolute COP difference, so
   it also engages when the tank sits below the curve and the refined COP is
   higher than the static one.
 
-The history has 34 commits, including fix-on-fix commits from review rounds.
+The history has 48 commits, including fix-on-fix commits from review rounds.
 Squash-merging is fine; I can also squash it into four commits (DP module,
 optimizer wiring and parameters, cooling, docs) before review.
 

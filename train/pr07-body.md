@@ -32,7 +32,9 @@ Stacked on <link to PR 6>; the diff below is only this PR's.
   storage); a malformed per-load `prior_heat` in `def_load_config` raises a
   `ValueError`, like the other `thermal_config` fields. A shorter list is
   right-aligned, a longer one keeps its most recent values, and either
-  alignment is logged.
+  alignment is logged. `prior_heat` given where there is no lag to seed (no
+  `thermal_inertia`, or a storage fed only by transfers) is ignored with an
+  info log.
 - Absent or empty gives zeros, which reproduces the current behaviour exactly.
 - `prior_heat` stays structural in the optimization cache key, because it is
   baked into the constraint as a raw array; this is noted at the exclusion list
@@ -53,7 +55,11 @@ Stacked on <link to PR 6>; the diff below is only this PR's.
 - `thermal_model.md`: `prior_heat` on a `thermal_config` load, in input W,
   with its own update recipe.
 - Both recipes shift the window once per completed time step, and resend the
-  same list when MPC runs more often than that.
+  same list when MPC runs more often than that. They say that a storage's
+  `prior_heat` is the heat of all its sources together (transfers are not
+  lagged), how to difference a counter (clamp a reset to 0, send 0 for an
+  unavailable reading), and which bad values are ignored (runtime) or fail
+  the run (configuration).
 - `passing_data.md`: `shared_tank_prior_heat`.
 
 ### Users without temperature management
@@ -65,8 +71,9 @@ are unchanged too.
 ### Verification
 
 - Regression tests (per-load and shared-tank initial condition, validation,
-  runtime parameter parsing, known-key list): 7 of 8 fail on the base, all pass
-  with the change.
+  runtime parameter parsing, known-key list, the no-lag log): 9 of 10 fail on
+  the base, all pass with the change. The one that passes on the base checks
+  that no `prior_heat` gives the current behaviour.
 - Full suite: 1360 passed, 1 skipped, 32 xfailed. Two tests that fetch live
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.

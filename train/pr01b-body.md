@@ -13,10 +13,10 @@ solution and publishes it to the sensors like an optimal one, with
 - the `/api/v1/plan` gate, which mirrors the same criterion, kept serving the
   previous plan, so the endpoint disagreed with the sensors.
 
-**Who sees this:** only setups with `LP_SOLVER=CPLEX` or `GUROBI`. In cvxpy,
-those solvers return `optimal_inaccurate` for example when the time limit is
-hit with a feasible solution. The default HiGHS solver never returns it (a
-HiGHS time-out is `user_limit`), so zero-config users see no change.
+**Who sees this:** only setups with `LP_SOLVER=CPLEX`. In cvxpy, CPLEX returns
+`optimal_inaccurate` for example when the time limit is hit with a feasible
+solution. HiGHS (the default) and Gurobi report a time-out as `user_limit`, so
+zero-config users see no change.
 
 This is a visible change on `/api/v1/last-run` for those users (`error` becomes
 `ok`). The same event on HiGHS goes through the relaxed fallback instead; how
@@ -43,7 +43,9 @@ followed by `os.replace`. The continual-publish loop already skips those temp
 files, but `_publish_from_saved_entities` (publish-data) did not: a stray temp
 file, left behind by a crash or seen mid-write, derived a bogus entity_id,
 raised a `KeyError` on the metadata lookup, and aborted the whole publish
-instead of skipping that one file. It now skips them the same way.
+instead of skipping that one file. It now skips them the same way, and when
+nothing but metadata and temp files is left it falls back to
+`opt_res_latest.csv` instead of failing on an empty result.
 
 ### Scope
 
@@ -52,8 +54,8 @@ optimizer itself is not touched, so no plan changes for any configuration.
 
 ### Verification
 
-- Three regression tests (last-run mapping, plan gate, temp-file skip) fail on
-  master and pass with the fix; the mapping test also checks the spelling
+- Four regression tests (last-run mapping, plan gate, temp-file skip, temp-only
+  fallback) fail on master and pass with the fix; the mapping test also checks the spelling
   against `cp.OPTIMAL_INACCURATE.title()`. A fourth test pins that
   `Optimal (Relaxed)` stays `error`.
 - Full suite: all tests pass except ones that need network access or a fresh
