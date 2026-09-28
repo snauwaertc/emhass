@@ -13230,6 +13230,37 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         ]
         return self.create_optimization()
 
+    def test_transfer_never_leaves_the_receiver_hotter_than_its_feeder(self):
+        """The transfer limit uses the start-of-step temperatures. With a large
+        conductance and a small feeder, one step could move more heat than it
+        takes to equalise the two stores, so the plan showed the receiver ending
+        hotter than the tank that fed it. The conductance is capped at the
+        equalisation limit, so that cannot happen."""
+        opt = self._configure_buffer_feeds_room()
+        # A buffer that may be drained low, and a strong emitter: at the end of the
+        # horizon the plan dumps the stored heat into the house.
+        opt.optim_conf["shared_thermal_tanks"][0]["min_temperatures"] = [5.0] * 48
+        opt.optim_conf["tank_transfers"][0]["transfer_coefficient"] = 5.0
+        opt.optim_conf["tank_transfers"][0]["max_transfer_power"] = 50000
+        res = self._solve_default_inputs(opt)
+        self.assertEqual(opt.optim_status, "Optimal")
+        buffer = res["predicted_temp_heater0"].to_numpy()
+        house = res["predicted_temp_heater3"].to_numpy()
+        transfer = res["P_transfer_buffer_house"].to_numpy()
+        for t in range(len(transfer) - 1):
+            if transfer[t] > 1.0:
+                self.assertGreaterEqual(buffer[t + 1], house[t + 1] - 0.01, f"step {t}")
+
+    def test_thermal_inertia_on_transfer_only_storage_warns(self):
+        """thermal_inertia lags a storage's own sources; transfers are not lagged,
+        so on a storage fed only by transfers it has no effect. Say so."""
+        opt = self._configure_buffer_feeds_room()
+        opt.optim_conf["shared_thermal_tanks"][1]["thermal_inertia"] = 3.0
+        with self.assertLogs(opt.logger, level="WARNING") as logs:
+            self._solve_default_inputs(opt)
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertTrue(any("thermal_inertia has no effect" in m for m in logs.output))
+
     def test_relaxed_rescue_restores_transfer_vars(self):
         """The relaxed-LP rescue rebuilds the constraints, which creates new tank
         transfer variables and rebinds self.transfer_vars to them.

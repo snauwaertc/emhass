@@ -4129,6 +4129,15 @@ class Optimization:
                 required_len - 1,
             ),
         )
+        if lag_steps > 0 and not load_ids:
+            # The lag applies to this storage's own sources; tank-to-tank transfers
+            # are not lagged, so on a storage fed only by transfers it does nothing.
+            self.logger.warning(
+                "Shared tank '%s': thermal_inertia has no effect on a storage fed only "
+                "by tank-to-tank transfers (transfers are not lagged)",
+                tank_id,
+            )
+            lag_steps = 0
 
         start_temperature = float(tank.get("start_temperature", 20.0))
         max_temperatures_list = tank.get("max_temperatures", [])
@@ -5177,6 +5186,12 @@ class Optimization:
                 )
                 big_m_xfer = k_xfer * SHARED_TANK_CAP_BIG_M_TEMP
                 constraints.append(q_var <= k_xfer * (t_from - t_to) + big_m_xfer * (1 - xfer_on))
+                # The same limit at the END of the step: the gradient at the start
+                # alone lets one step move more heat than it takes to equalise the
+                # two tanks, leaving the receiver hotter than the tank that fed it.
+                constraints.append(
+                    q_var[:-1] <= k_xfer * (t_from[1:] - t_to[1:]) + big_m_xfer * (1 - xfer_on[:-1])
+                )
                 constraints.append(q_var <= qmax * xfer_on)
             else:
                 # One or both endpoint temperatures are absent (a tank id in
