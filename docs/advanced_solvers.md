@@ -115,7 +115,7 @@ lp_solver_mip_rel_gap: 0.05  # Stop when within 5% of optimal
 shared thermal tanks fed by a curve-driven heat pump. `static` (the default)
 keeps the constant heating-curve COP and never re-solves. `auto` adds a
 post-solve refinement and, when it finds an inconsistency, a second
-(half the HiGHS time limit) MILP solve: better plans on thermal-heavy setups,
+(half of the solver's time limit, at least 10 s) MILP solve: better plans on thermal-heavy setups,
 at the cost of extra wall-clock on every run where it triggers. `dp` always runs
 it. See [the heat topology docs](heat_topology.md) for when it matters.
 
@@ -188,7 +188,7 @@ turning it up.
   model can add real time on a Pi behind cellular/Tailscale.
 - `cop_solver`: for shared thermal tanks fed by a curve-driven heat pump,
   `auto` adds a post-solve dynamic-programming COP refinement and, when it
-  finds an inconsistency, a second (half the HiGHS time limit) MILP solve -
+  finds an inconsistency, a second (half of the solver's time limit, at least 10 s) MILP solve -
   worthwhile plan quality on thermal-heavy setups, but extra wall-clock on
   every cycle where it triggers. The default `static` keeps the constant
   heating-curve COP and never re-solves. See

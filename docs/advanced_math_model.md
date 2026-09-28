@@ -352,19 +352,23 @@ To recover the true optimum without abandoning the fast LP, EMHASS adds a post-s
    can be refined *jointly* - a second state in the DP - so the decision to
    super-heat accounts for what the coupled store can absorb. The coupled grid is
    bounded to keep the state space tractable.
-4. **Re-solve.** The DP's COP, and a ceiling (1 degree above the higher of the DP's
-   peak temperature and the temperature the static COP is valid for), are fed back as
-   a corrected parameter and an extra constraint, and the problem is solved once
-   more, as a new problem with half of the HiGHS time limit. The ceiling prevents the
-   re-solve from exploiting the now-fixed favourable COP by super-heating past the
-   true optimum.
+4. **Re-solve.** The DP's COP for each step, and a per-step ceiling 1 degree above
+   the DP's trajectory (a floor 1 degree below it when cooling), are fed back as a
+   corrected parameter and extra constraints, and the problem is solved once more,
+   as a new problem with half of the solver's time limit (at least 10 s). The
+   ceiling keeps the re-solve at the temperatures its COP was priced for, so it
+   cannot super-heat on a COP that belongs to a colder temperature.
 
-If the re-solve fails or times out, the original plan is kept. If the DP finds no
-feasible trajectory, the store is capped at the temperature its static COP is valid
-for and re-solved. The DP uses one minimum and maximum temperature for the whole
-horizon and does not see the soft `desired_temperature`; the re-solve still
-enforces both. The DP itself is not bound by the solver time limit: a coupled
-store near the 200-state cap can take tens of seconds on slow hardware.
+If the re-solve fails, times out or is infeasible (for example when demand outruns
+the DP's estimate), the original plan is kept. If the DP finds no feasible
+trajectory, the store is capped at the temperature its static COP is valid for
+(each step's curve supply minus the approach) and re-solved. The DP uses one
+minimum and maximum temperature for the whole horizon, does not see the soft
+`desired_temperature`, and ignores the store's `thermal_inertia`; the re-solve
+still enforces the bounds and the lag. The DP itself is not bound by the solver
+time limit. Measured on x86 over 96 steps: about 14 s for a buffer with a coupled
+pool at the default grid, and about 60 s with the tank grid at its 200-state cap
+(the coupled grid is capped at 64 states); slower hardware takes longer.
 
 **Cooling.** For a `cool` store fed by a heat pump with a `cooling_curve`, the DP runs
 in cooling mode: the unit removes heat, the evaporator runs below the store
