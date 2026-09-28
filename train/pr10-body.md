@@ -49,7 +49,7 @@ Docs and one test only; no code changes.
 
 - The new test passes (the example solves Optimal in about a second).
 - Sphinx build: no warnings on the changed pages; the new anchors resolve.
-- Full suite: 1361 passed, 1 skipped, 32 xfailed. Two tests that fetch live
+- Full suite: 1393 passed, 1 skipped, 32 xfailed. Two tests that fetch live
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.

@@ -93,7 +93,7 @@ tank sets it.
   `heat_topology is invalid: heat_topology.flows[0].from='ghost_source' does not
   match any source.id`
   and the file is left untouched. The only console error is that expected 400.
-- Full suite: 1293 passed, 1 skipped, 32 xfailed. Two tests that fetch live
+- Full suite: 1303 passed, 1 skipped, 32 xfailed. Two tests that fetch live
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.

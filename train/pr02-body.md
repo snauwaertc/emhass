@@ -55,5 +55,5 @@ the solver-exception one, and it only changes what happens after a crash.
 ### Verification
 
 - Every regression test: red on the base, green with its fix.
-- Full suite: 1255 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on the base there.
+- Full suite: 1259 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.

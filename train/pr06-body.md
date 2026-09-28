@@ -55,7 +55,7 @@ byte-identical result DataFrames.
 - The DP re-derivation of the ON level is covered: a capped heat pump on a tank
   kept cool (the refined COP is above the static one at every step) is
   abandoned with an Optimal status without it, and runs with it.
-- Full suite: 1353 passed, 1 skipped, 32 xfailed. Two tests that fetch live
+- Full suite: 1383 passed, 1 skipped, 32 xfailed. Two tests that fetch live
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.

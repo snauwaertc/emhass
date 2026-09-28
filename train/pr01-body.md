@@ -89,5 +89,5 @@ Smaller side effects of the fixes, for completeness:
 ### Verification
 
 - Every regression test: red on master, green with its fix.
-- Full suite on this branch: 1247 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on master there and are untouched by this PR.
+- Full suite on this branch: 1246 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on master there and are untouched by this PR.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
