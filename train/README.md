@@ -87,3 +87,23 @@ that, the differences are deliberate:
 ## Docs per PR
 
 See `docs-audit.md` for the audit that drove the docs in each PR.
+
+## Open question: the DP re-solve bound (PR 5)
+
+A final shadow run of the real hybrid topology (heat pump + gas, DHW, buffer,
+pool, house; `scripts/shadow_run_pi.py` on `pi/train-final`) shows a trade-off
+in how the DP re-solve is bounded:
+
+| Re-solve bound | Energy | House comfort shortfall | Worst COP overstatement |
+|---|---|---|---|
+| none (`static`) | 4.78 | 1.2 K·step | (static COP, off by up to 1.5) |
+| per step, DP trajectory + 1 C (current) | 5.42 | 3.3 K·step | 0.22 |
+| one cap at the DP peak + 1 C | 4.81 | 1.2 K·step | 2.25 |
+| DP peak + second pass at the reached COP | 5.29 | 1.2 K·step | 1.52 |
+
+The per-step bound keeps the COP consistent but holds the buffer near the DP's
+trajectory, so a house fed through a gradient-limited transfer recovers to its
+target hours later. Independently, the DP does not know a heat pump's
+`max_supply_temperature` and plans it past it (DHW to 61 C, served by gas in the
+LP); a fix for that is ready. `cop_solver` defaults to `static`, so default
+users are not affected.
