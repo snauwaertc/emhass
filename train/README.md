@@ -32,8 +32,9 @@ against master.
 The review-round fix-on-fix commits of PRs 4, 5, 6 and 9 are squashed: PR 4
 has 3 commits, PR 5 3, PR 6 2 and PR 9 5 (one per proposal, the PR 1b commit
 and docs). Every commit passes the full suite, and each PR's final tree is unchanged.
-The unsquashed tips were 0efe9e15 (PR 4), 74e9ab6f (PR 5), a6f4712c (PR 6)
-and ad43bdf5 (PR 9).
+The unsquashed history is kept on the fork as `backup/pre-squash/*` (the
+whole chain from PR 4 to PR 10 and the Pi branch as they were just before
+the squash). These branches are for reference only and never go upstream.
 
 Suggested sequence: open 1 and 1b together, then 2, 3, 4, 5, 6 one at a time as
 each merges (they are stacked), then 10. File both issues with PR 1 so the
