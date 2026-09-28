@@ -34,6 +34,11 @@ Stacked on <link to PR 5>; the diff below is only this PR's.
 - The compiler rejects a non-positive, NaN, infinite or non-numeric
   `max_thermal_power`.
 
+### Commits
+
+1. The cap, the per-step ON level and the collision warning (LP, DP, compiler).
+2. Docs.
+
 ### Documentation
 
 - `heat_topology.md`: the `max_thermal_power` field and a
@@ -51,7 +56,9 @@ byte-identical result DataFrames.
 
 ### Verification
 
-- Every commit with tests: red on the base, green with the change.
+- Every regression test fails without its fix and passes with it (checked
+  before the review-round fixes were squashed); every commit passes the full
+  suite.
 - The DP re-derivation of the ON level is covered: a capped heat pump on a tank
   kept cool (the refined COP is above the static one at every step) is
   abandoned with an Optimal status without it, and runs with it.

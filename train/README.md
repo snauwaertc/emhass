@@ -29,9 +29,11 @@ against master.
 | 9 | `pr/09-relaxed-fallback` | 7 (+1b) | keep mutex in the fallback, keep time-limited incumbents, report both as ok | after `issue-relaxed-fallback.md` is answered |
 | 10 | `pr/10-thermal-onboarding-docs` | 7 | which model to use, migration guide, hybrid walkthrough (tested example) | ready once 2-7 are in |
 
-PR 5 has 48 commits (the DP solver grew through review rounds, each with its
-own regression test); it reads well commit by commit, but squash-merging it is
-fine too.
+The review-round fix-on-fix commits of PRs 4, 5, 6 and 9 are squashed: PR 4
+has 3 commits, PR 5 3, PR 6 2 and PR 9 5 (one per proposal, the PR 1b commit
+and docs). Every commit passes the full suite, and each PR's final tree is unchanged.
+The unsquashed tips were 0efe9e15 (PR 4), 74e9ab6f (PR 5), a6f4712c (PR 6)
+and ad43bdf5 (PR 9).
 
 Suggested sequence: open 1 and 1b together, then 2, 3, 4, 5, 6 one at a time as
 each merges (they are stacked), then 10. File both issues with PR 1 so the

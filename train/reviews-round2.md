@@ -62,4 +62,4 @@ cascade was rebased (1 → 2 → … → 7 → 9, and 10 on 7); 1b and 8 stay on
 | 9 | Rebased onto PR 5's skip guard (one combined guard); a real DP re-solve time-out test (red without the incumbent check); the time-out test asserts the actual outcome (`User_Limit`, no plan); MIP gap in the incumbent log; solver report read inside the try; CPLEX/Gurobi wording; output-schema statuses. |
 | 10 | Heat pump modelled as two sources (DHW 55 C supply, space-heating curve) in one mutual-exclusion group; one-value maximum-temperature lists (which bound only the first step) replaced by per-step lists; migration guide: concrete vs water defaults, per-load settings, no-equivalent fields; `temp_predicted2` and `Optimal_Inaccurate` rows; `cop_solver` scope; the test executes the page's own Python block. |
 
-Fix-on-fix history (PRs 4, 5, 6, 9) is left as is; each body offers a squash.
+Fix-on-fix history (PRs 4, 5, 6, 9): squashed into logical commits, each passing the full suite; the final trees are unchanged.

@@ -77,6 +77,12 @@ binaries (it is still a MILP, not a pure LP), and window solar duplicates the
 formula of the existing `solar_absorption_area` path rather than reusing its
 helper.
 
+### Commits
+
+1. The compiler: zone fields, storage-to-storage flows, validation.
+2. The optimizer: zones, transfers, window solar, lag, start below the floor.
+3. Docs.
+
 ### Documentation
 
 - `heat_topology.md`: building-zone storage (fields, example, equivalence to
@@ -95,6 +101,8 @@ DataFrames are byte-identical.
 
 ### Verification
 
-- Every commit with tests: red on the base, green with the change.
+- Every regression test fails without its fix and passes with it (checked
+  before the review-round fixes were squashed); every commit passes the full
+  suite.
 - Full suite: 1325 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.

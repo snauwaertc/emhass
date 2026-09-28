@@ -62,6 +62,17 @@ No schema change (`ok` / `infeasible` / `error` as before).
 A solve that finishes normally is unchanged: A/B against master with six
 non-thermal configurations gives byte-identical result DataFrames.
 
+### Commits
+
+One per proposal, so any of them can be dropped, plus the PR 1b commit and
+the docs:
+
+1. Mutual exclusion in the relaxed fallback.
+2. Time-limited incumbents.
+3. `Optimal_Inaccurate` as ok (identical to PR 1b's commit).
+4. Relaxed and incumbent plans as ok on the API.
+5. Docs.
+
 ### Documentation
 
 - `publish_data.md`: every `optim_status` value, what it means for the plan,
@@ -88,6 +99,3 @@ non-thermal configurations gives byte-identical result DataFrames.
   open-meteo data failed in a sandbox without network; they fail identically
   on the base there.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
-
-The history carries fix-on-fix commits from review rounds; squash-merging is
-fine, or I can squash it into the three proposals before review.

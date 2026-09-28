@@ -66,9 +66,11 @@ predicate instead of an inline list.
   it also engages when the tank sits below the curve and the refined COP is
   higher than the static one.
 
-The history has 48 commits, including fix-on-fix commits from review rounds.
-Squash-merging is fine; I can also squash it into four commits (DP module,
-optimizer wiring and parameters, cooling, docs) before review.
+### Commits
+
+1. The DP solver module (`thermal_dp.py`, heating and cooling) and its tests.
+2. The optimizer wiring, cooling compile and the three parameters.
+3. Docs.
 
 ### Documentation
 
@@ -90,7 +92,8 @@ configurations: byte-identical result DataFrames.
 
 ### Verification
 
-- Every commit with tests: red on the base, green with the change (the DP
-  module's own tests are new code).
+- Every regression test fails without its fix and passes with it (checked
+  before the review-round fixes were squashed; the DP module's own tests are
+  new code); every commit passes the full suite.
 - Full suite: 1370 passed, 1 skipped, 32 xfailed. Two tests that fetch live open-meteo data failed in a sandbox without network; they fail identically on the base there. Sphinx build: no warnings on the changed pages.
 - `uvx ruff check .` and `uvx ruff format --check --diff`: clean.
