@@ -4843,6 +4843,8 @@ class Optimization:
         mode = self._cop_solver
         if not entries or mode == "static" or self.prob is None or self.prob.value is None:
             return
+        if self._needs_relaxed_retry(self.prob.status, self.prob.value):
+            return  # a failed or timed-out solve has no plan to refine
         from emhass.thermal_dp import ThermalDPParams, solve_thermal_dp
 
         tol = float(self.optim_conf.get("cop_solver_tolerance", 0.5))

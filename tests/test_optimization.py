@@ -14408,6 +14408,26 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DP COP refinement on tank 'buffer'", log)
         self.assertNotIn("cannot refine", log)
 
+    def test_dp_refinement_skipped_after_a_failed_solve(self):
+        """The refinement starts from the static solve's plan. When that solve
+        failed (here: a time limit too short to find anything, which HiGHS reports
+        with value 0 and every variable at 0), there is no plan to refine, so the
+        DP must not run on those values."""
+        from emhass import thermal_dp
+
+        opt = self._dp_refinable_setup()
+        opt.optim_conf["lp_solver_timeout"] = 1e-6
+        calls = []
+        original = thermal_dp.solve_thermal_dp
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(thermal_dp, "solve_thermal_dp", counting):
+            self._solve_default_inputs(opt)
+        self.assertEqual(calls, [])
+
     def test_dp_resolve_rejection_preserves_static_plan(self):
         """Coverage for the rejected-DP-re-solve path: the published plan must stay
         valid (not nulled) when the refinement re-solve is rejected. prob2 shares the
