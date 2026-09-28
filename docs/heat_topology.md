@@ -175,7 +175,9 @@ at least 6 timesteps, and every degree below the configured minimum inside that
 window carries a high penalty. A storage whose sources can recover quickly
 still does so right away; one that cannot follows the ramp instead of making
 the problem infeasible. Each configured minimum applies in full once the ramp
-reaches it.
+reaches it. Only the minimums of the first 6 timesteps trigger this; a minimum
+that rises later in the horizon (for example a scheduled legionella cycle) stays
+hard, because the plan can heat ahead for it.
 
 #### Building-zone storage
 
@@ -189,8 +191,8 @@ are optional; without them a storage is a water tank as before.
 | --- | --- | --- |
 | `thermal_mass` | kWh/K | Heat capacity, instead of `volume`. |
 | `loss_coefficient` | kW/K | Heat-loss coefficient UA. The loss becomes `UA * (T - outdoor)`, so a warmer zone loses more and the optimizer can pre-heat on cheap power and coast through a price peak. Cannot be combined with a `building_demand` consumer, which also models the loss to outdoor. |
-| `thermal_inertia` | hours | Delay between heat input and the temperature response, as in the thermal model. Applied in whole timesteps (rounded down) and capped at the horizon. |
-| `window_area`, `shgc` | m2, fraction | Solar gain through glazing from the GHI forecast (`window_area * shgc * GHI`), which offsets the zone's heating need. `shgc` defaults to `0.6`. |
+| `thermal_inertia` | hours | Delay between the storage's own source heat and the temperature response, as in the thermal model. Applied in whole timesteps (rounded down) and capped at the horizon. Transfers are not lagged, so on a storage fed only by transfers it is ignored (with a warning). Over the first lagged steps no source heat arrives, so the minimum temperature there is priced rather than hard. |
+| `window_area`, `shgc` | m2, fraction | Solar gain through glazing from the GHI forecast (`window_area * shgc * GHI`), which offsets the zone's heating need. `shgc` defaults to `0.6`. Applied only to a zone with `loss_coefficient`, and only when the weather data has GHI (open-meteo); otherwise it is zero. |
 
 For example, a house held between 19.5 and 21.5 degrees Celsius, with a
 soft target of 20.5, on a 48-step horizon (Python notation; convert it to JSON
@@ -373,12 +375,14 @@ buffer feeding a room through its emitters:
 
 | Field | Units | Description |
 | --- | --- | --- |
-| `transfer_coefficient` | kW/K | Emitter conductance; default `1.0`. The transfer is at most `transfer_coefficient * (T_from - T_to)`. |
-| `max_transfer_power` | W | Maximum transferred heat power; default unlimited. |
+| `transfer_coefficient` | kW/K | Emitter conductance, positive; default `1.0`. The transfer is at most `transfer_coefficient * (T_from - T_to)`, both at the start and at the end of the step. |
+| `max_transfer_power` | W | Maximum transferred heat power, positive; default unlimited. |
 
 Heat only flows from the hotter storage to the cooler one: when the receiver is
-as warm as the feeder or warmer, the transfer is zero. A storage that is only
-fed by a transfer (no source flow) still gets a temperature state.
+as warm as the feeder or warmer, the transfer is zero, and a step never ends
+with the receiver warmer than its feeder. A storage that is only fed by a
+transfer (no source flow) still gets a temperature state, but no
+`min_temp_heater` / `max_temp_heater` / `target_temp_heater` columns.
 
 ## Publishing results
 

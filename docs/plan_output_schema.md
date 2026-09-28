@@ -47,7 +47,8 @@ tank-to-tank transfers also adds one `P_transfer_{from}_{to}` column per transfe
 (delivered heat, W, non-negative). A storage that is only fed by a transfer has
 no load of its own: its temperature is in `predicted_temp_heater{n + i}`, where
 `n` is the number of deferrable loads and `i` the storage's position in the
-topology. Neither is published to Home Assistant.
+tank list (its position in `storage`, after any manual `shared_thermal_tanks` in
+extend mode). Adding a source flow changes `n`, and so this index. Neither is published to Home Assistant.
 
 | Column | Source helper | Unit | Sign convention | Conditional | HA scaling | `type_var` | Notes |
 |--------|---------------|------|-----------------|-------------|------------|------------|-------|
