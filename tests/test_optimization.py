@@ -15160,6 +15160,70 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(res["P_deferrable0"].sum(), 0.0, places=3)
         self.assertAlmostEqual(res["P_deferrable0"].max(), 0.0, places=3)
 
+    def test_dp_rederives_capped_on_level_from_the_refined_cop(self):
+        """With cop_solver 'dp' the refinement changes a capped heat pump's COP. Its
+        semi-continuous ON level (min(nominal, cap/COP)) must follow the refined
+        COP; otherwise, where the refined COP is higher than the static one, the
+        strict p == ON_level * bin equality exceeds the thermal cap and OFF is the
+        only feasible state: the heat pump is abandoned with an Optimal status.
+        A low target keeps the tank cool, so the refined COP (3.4-3.7) stays above
+        the static one (3.1, at the curve's 55.5 C supply) at every step."""
+        from emhass import utils
+
+        cap = 8000
+        topo = {
+            "sources": [
+                {
+                    "id": "hp",
+                    "type": "heatpump",
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 38,
+                        "min_supply": 28,
+                        "max_supply": 70,
+                    },
+                    "carnot_efficiency": 0.46,
+                    "nominal_power": 5700,
+                    "max_thermal_power": cap,
+                }
+            ],
+            "storage": [
+                {
+                    "id": "tank",
+                    "volume": 1.0,
+                    "start_temperature": 25.0,
+                    "thermal_loss": 0.0,
+                    "min_temperature": [20.0] * 48,
+                    "max_temperature": [65.0] * 48,
+                    "desired_temperature": 32,
+                    "penalty_factor": 50,
+                }
+            ],
+            "flows": [{"from": "hp", "to": "tank"}],
+        }
+        for key, val in utils.compile_heat_topology(topo).items():
+            self.optim_conf[key] = val
+        self.optim_conf["cop_solver"] = "dp"
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [-5.0] * 48
+        opt = self.create_optimization()
+        res = opt.perform_optimization(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            np.full(48, 0.10),
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+        self.assertEqual(opt.optim_status, "Optimal")
+        power = res["P_deferrable0"].to_numpy()
+        self.assertGreater(power.sum(), 0.0, "the capped heat pump was abandoned")
+        cop = np.asarray(opt._dp_tank_entries[0]["hp"]["cop_param"].value, dtype=float)
+        self.assertLessEqual(float(np.max(cop[: len(power)] * power)), cap + 1.0)
+        on_level = opt._semi_cont_on_level[0].value
+        np.testing.assert_allclose(
+            on_level, np.minimum(5700.0, cap / cop[: len(on_level)]), rtol=1e-6
+        )
+
     def test_min_power_collision_warns_for_continuous_source(self):
         """A continuous capped source collides the same way: cop * p <= cap and
         p >= min_power * bin leave OFF as the only feasible state where
