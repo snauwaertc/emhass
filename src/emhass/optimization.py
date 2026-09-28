@@ -4733,7 +4733,7 @@ class Optimization:
             # coupled store above is excluded). At refinement time their draw on this tank
             # is replaced by their own comfort need (the loss to hold their target), not
             # the realised transfer - which scales with this tank's banked temperature and
-            # would poison the DP's demand (the demand-decoupling fix).
+            # would poison the DP's demand.
             coupled_to = coupled["to"] if coupled is not None else None
             non_coupled_receivers = []
             for tr in self._get_tank_transfers() if transfer_vars else []:
@@ -4745,7 +4745,11 @@ class Optimization:
                 rtgt = next(
                     (s for s in self._get_shared_thermal_tanks() if s.get("id") == tr["to"]), None
                 )
-                if rtgt is None:
+                if rtgt is None or rtgt.get("loss_coefficient") is None:
+                    # Only a zone's need can be estimated independently of this tank
+                    # (loss to hold its target). For another receiver (e.g. a hot-water
+                    # tank with a draw-off profile) keep the realised transfer in the
+                    # demand rather than dropping it to zero.
                     continue
                 rdes = rtgt.get("desired_temperatures")
                 rdes_v = (
@@ -4913,7 +4917,7 @@ class Optimization:
                 # `ext` was inflated by the first solve banking this tank hot. Swap it for
                 # the receiver's own comfort need (loss to hold its target), which does NOT
                 # depend on this tank's temperature - so the DP is not poisoned by the very
-                # over-banking it exists to correct (the demand-decoupling fix).
+                # over-banking it exists to correct.
                 outdoor_full = np.asarray(e["outdoor"], dtype=float)[:n]
                 for rcv in e.get("non_coupled_receivers", []):
                     if rcv.get("q_var") is None:

@@ -14319,7 +14319,8 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         is inflated when the first solve banks the buffer hot, and would poison the DP's
         demand). The house must be registered as a non-coupled receiver and the DP must
         engage (refine), not skip. The pool also starts warmer than the buffer, exercising
-        the uphill-transfer fix (a cold feeder must still coast a warmer coupled store)."""
+        a transfer that is off when the receiver is warmer (a cold feeder must still
+        coast a warmer coupled store)."""
         self.df_input_data_dayahead = self.prepare_forecast_data()
         self.df_input_data_dayahead["outdoor_temperature_forecast"] = [5.0] * 48
         self._setup_single_hp(nominal=8000)
@@ -14562,6 +14563,69 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(seen, "the DP refinement must run with cop_solver='dp'")
         # No draw-off and no transfers: the DP demand is exactly the flat loss (kW).
         np.testing.assert_allclose(seen[0], 0.1, atol=1e-6)
+
+    def test_dp_keeps_demand_of_a_receiver_without_loss_coefficient(self):
+        """A buffer feeding a hot-water tank (no loss_coefficient, a draw-off
+        profile) must pass that load to the DP. Only a zone's need can be derived
+        from its loss_coefficient; for another receiver the realised transfer
+        stays in the demand instead of being replaced by zero."""
+        from emhass import thermal_dp
+
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = [0.0] * 48
+        self._setup_single_hp(nominal=6000)
+        self.optim_conf["def_load_config"] = [
+            {
+                "thermal_source": {
+                    "heating_curve": {
+                        "slope": 0.7,
+                        "offset": 30,
+                        "min_supply": 25,
+                        "max_supply": 55,
+                    },
+                    "carnot_efficiency": 0.45,
+                }
+            },
+        ]
+        self.optim_conf["shared_thermal_tanks"] = [
+            {
+                "id": "buffer",
+                "load_ids": [0],
+                "thermal_mass": 1.0,
+                "loss_coefficient": 0.05,
+                "start_temperature": 50.0,
+                "min_temperatures": [45.0] * 48,
+                "max_temperatures": [55.0] * 48,
+            },
+            {
+                "id": "dhw",
+                "load_ids": [],
+                "volume": 0.2,
+                "start_temperature": 47.0,
+                "thermal_loss": 0.0,
+                "draw_off_demand": [0.5] * 48,
+                "min_temperatures": [40.0] * 48,
+                "max_temperatures": [55.0] * 48,
+            },
+        ]
+        self.optim_conf["tank_transfers"] = [
+            {"from": "buffer", "to": "dhw", "transfer_coefficient": 2.0, "max_transfer_power": 8000}
+        ]
+        self.optim_conf["cop_solver"] = "dp"
+        seen = []
+        original = thermal_dp.solve_thermal_dp
+
+        def capture(price, outdoor, params, **kwargs):
+            seen.append(np.asarray(params.demand_kw, dtype=float))
+            return original(price, outdoor, params, **kwargs)
+
+        opt = self.create_optimization()
+        with mock.patch.object(thermal_dp, "solve_thermal_dp", capture):
+            self._solve_default_inputs(opt)
+        self.assertTrue(seen, "the DP refinement must run")
+        # The hot-water tank draws 0.5 kWh per 30-min step, i.e. about 1 kW that
+        # the buffer supplies through the transfer.
+        self.assertGreater(float(np.mean(seen[0])), 0.5)
 
     def _dp_refinable_setup(self):
         """A heating-curve HP on a zone tank with cop_solver=dp: the DP refinement
