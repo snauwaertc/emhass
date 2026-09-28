@@ -63,3 +63,15 @@ cascade was rebased (1 → 2 → … → 7 → 9, and 10 on 7); 1b and 8 stay on
 | 10 | Heat pump modelled as two sources (DHW 55 C supply, space-heating curve) in one mutual-exclusion group; one-value maximum-temperature lists (which bound only the first step) replaced by per-step lists; migration guide: concrete vs water defaults, per-load settings, no-equivalent fields; `temp_predicted2` and `Optimal_Inaccurate` rows; `cop_solver` scope; the test executes the page's own Python block. |
 
 Fix-on-fix history (PRs 4, 5, 6, 9): squashed into logical commits, each passing the full suite; the final trees are unchanged.
+
+## Final rerun (shadow run of the real topology)
+
+The round-2 fix for PR 5 (a re-solve bound per step at the DP's trajectory)
+turned out to starve a house fed through a gradient-limited transfer, and the
+DP ignored a heat pump's `max_supply_temperature`. Both are fixed in PR 5: the
+re-solve is bounded at the DP's peak again (without the `max_supply` term that
+caused the round-2 finding, so `test_dp_refined_plan_is_cop_consistent` still
+passes), and the DP respects the condenser ceiling. A regression test covers
+the starved zone. See "Decision: the DP re-solve bound" in `README.md` for the
+measured options; `static` remains the default and the cheapest on that
+topology.

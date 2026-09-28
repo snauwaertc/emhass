@@ -20,14 +20,13 @@ Stacked on <link to PR 4>; the diff below is only this PR's.
 - `src/emhass/thermal_dp.py`: a generic DP solver for one heat-pump store,
   optionally with a coupled second store (e.g. buffer + pool), with per-step
   COP (`COP[t, T]`), a marginal price that drops to the export price during PV
-  surplus, a bounded state count, and a cooling mode.
+  surplus, the heat pump's `max_supply_temperature` (above it only a backup adds
+  heat), a bounded state count, and a cooling mode.
 - `Optimization._refine_cop_with_dp`: consistency check, DP, and a re-solve
-  with half of the solver's time limit (HiGHS, Gurobi or CPLEX), bounded per
-  step to 1 C above the DP's trajectory so the plan stays at the temperatures its
-  COP was priced for. The DP prices the tank's own `desired_temperatures`
-  shortfall (`penalty_factor` per degree) like the solve does; without it the
-  ceiling would hold a tank that starts below its target at the start
-  temperature. It does not run when the static solve failed. A re-solve that the main
+  with half of the solver's time limit (HiGHS, Gurobi or CPLEX), bounded to 1 C
+  above the DP's peak (not per step: see the limits below). The DP prices the
+  tank's own `desired_temperatures` shortfall (`penalty_factor` per degree)
+  like the solve does. It does not run when the static solve failed. A re-solve that the main
   path's own acceptance rule would reject keeps the static plan. The refined
   problem is handed to the result extraction without replacing the cached
   problem (#1048), and the DP registry is restored after a relaxed rescue.
@@ -54,8 +53,23 @@ predicate instead of an inline list.
   run.
 - The DP models the tank with one minimum and maximum over the horizon and
   without `thermal_inertia`, and it does not see a coupled store's comfort
-  target; the re-solve enforces all of them. If demand outruns the DP's estimate, the
-  per-step ceiling makes the re-solve infeasible and the static plan is kept.
+  target; the re-solve enforces all of them. If demand outruns the DP's estimate,
+  the ceiling makes the re-solve infeasible and the static plan is kept.
+- **The refined plan is not always cheaper.** The DP optimises a simplified
+  model: one tank, at most one coupled store, other receivers as a fixed
+  demand. A shadow run of a hybrid system (heat pump + gas boiler, DHW tank,
+  buffer feeding a pool and a house), re-costed with the COP at the
+  temperatures each plan reaches, cost 5.12 with `static` and 5.55 with `auto`
+  (the DP keeps the buffer hotter, where the heat pump delivers less, and the
+  boiler tops up). The docs recommend comparing both; `static` stays the
+  default.
+- The re-solve bound is a trade-off. A bound per step at the DP's trajectory
+  keeps the COP exact but starved a house fed through a gradient-limited
+  transfer (it stayed below its target for hours; a regression test covers
+  this). The bound at the DP's peak keeps the house as warm as `static`, but a
+  step the re-solve takes hotter than the DP priced keeps an optimistic COP
+  (up to 2.25 in the shadow run). Iterating the COP towards the reached
+  temperatures was tried: it made the plan consistent but costlier (6.80).
 - The DP's runtime is not bound by the solver time limit: about 14 s for a
   buffer + pool over 96 steps on x86 at the default grid, about 60 s with the
   tank grid at its 200-state cap (the coupled grid is capped at 64).
