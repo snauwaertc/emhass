@@ -13986,7 +13986,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         # max_deficit 10 C, rate 0.5 C/step -> window 20; floor 45 holds afterward.
         self.assertGreaterEqual(temp.iloc[20:].min(), 45.0 - 0.1)
 
-    def _dp_refine_scenario(self, cop_solver):
+    def _dp_refine_scenario(self, cop_solver, max_supply=40):
         """A heat-pump buffer with an OPTIMISTIC static COP (low 30 C supply curve)
         and a high ceiling, on a cheap-then-dear spread. With the wrong static COP the
         optimiser thinks super-heating is nearly free and banks the buffer hot; the DP
@@ -14003,7 +14003,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
                         "slope": 0.7,
                         "offset": 30,
                         "min_supply": 25,
-                        "max_supply": 40,
+                        "max_supply": max_supply,
                     },
                     "carnot_efficiency": 0.45,
                     "max_supply_temperature": 62,
@@ -14071,6 +14071,28 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             opt, _, _ = self._dp_refine_scenario(solver)
             names = [param.name() for param in opt.prob.parameters()]
             self.assertEqual(any(n.startswith("cop_buffer") for n in names), expect_param, solver)
+
+    def test_dp_refined_plan_is_cop_consistent(self):
+        """After the refinement, the plan's temperatures must match the COP it was
+        priced at: the refined COP of each step must stay within the consistency
+        tolerance of the COP at the temperature the re-solve reaches. A single cap
+        at the DP's peak (or at the curve's max_supply, 70 C by default) let the
+        re-solve super-heat the steps the DP kept cold at a COP priced for the cold
+        temperature."""
+        from emhass import utils
+
+        opt, res, temps = self._dp_refine_scenario("auto", max_supply=70)
+        self.assertEqual(opt.optim_status, "Optimal")
+        entry = opt._dp_tank_entries[0]
+        hp = entry["hp"]
+        cop_used = np.asarray(hp["cop_param"].value, dtype=float)
+        outdoor = np.asarray(entry["outdoor"], dtype=float)
+        n = len(temps)
+        cop_reached = utils.cop_from_tank_temperature(
+            temps[1:], hp["carnot"], outdoor[: n - 1], approach=hp["approach"], mode="heat"
+        )
+        worst = float(np.max(cop_used[: n - 1] - cop_reached))
+        self.assertLessEqual(worst, opt.optim_conf.get("cop_solver_tolerance", 0.5))
 
     def test_dp_cop_refinement_noop_when_consistent(self):
         """When the static COP is already consistent with the tank temperatures the

@@ -4988,9 +4988,10 @@ class Optimization:
                     # penalise driving the tank ABOVE that supply (where the real COP is
                     # far lower) - which lets the solver bank heat into the un-priced
                     # high-temperature region. Keep the static COP but conservatively cap
-                    # the tank at the temperature that COP is valid for - the curve's max
-                    # supply minus the heat-exchanger approach - so it cannot be driven
-                    # into the optimistic region the DP would otherwise have priced down.
+                    # the tank at the temperature that COP is valid for - each step's
+                    # curve supply minus the heat-exchanger approach - so it cannot be
+                    # driven into the optimistic region the DP would otherwise have
+                    # priced down.
                     if sense == "cool":
                         # Cool-mode DP infeasible (rare): keep the static cooling COP rather
                         # than applying a heating-shaped temperature cap.
@@ -5001,14 +5002,17 @@ class Optimization:
                         continue
                     src_cfg = self._get_load_source_config(hp["load_idx"])
                     curve = src_cfg.get("heating_curve") or {}
-                    valid_temp = float(curve.get("max_supply", 70.0)) - float(hp["approach"])
-                    extra_constraints.append(e["predicted_temp"][1:] <= valid_temp + 1.0)
+                    valid_temp = (
+                        np.asarray(utils.apply_heating_curve(curve, outdoor_arr), dtype=float)
+                        - float(hp["approach"])
+                    )[:n]
+                    extra_constraints.append(e["predicted_temp"][1:] <= valid_temp[:-1] + 1.0)
                     self.logger.warning(
                         "DP COP solver: tank '%s' demand exceeds deliverable heat - cannot "
-                        "refine; capping it at %.0f C (the static-COP-valid temperature) "
-                        "instead of trusting the optimistic static COP",
+                        "refine; capping it at up to %.0f C (the static-COP-valid "
+                        "temperature) instead of trusting the optimistic static COP",
                         e["tank_id"],
-                        valid_temp,
+                        float(valid_temp.max()),
                     )
                     continue
                 traj = np.asarray(res.tank_trajectory, dtype=float)  # length n + 1
@@ -5019,21 +5023,19 @@ class Optimization:
                 hp["cop_param"].value = utils.cop_from_tank_temperature(
                     end_temp, hp["carnot"], outdoor_arr, approach=hp["approach"], mode=sense
                 )
-                # Bound the re-solve to the DP's priced temperature range so it cannot
-                # exploit the un-priced region beyond it. Cool: floor the re-solve at the
-                # DP's TROUGH (the coldest it priced) - super-cooling below it would run on
-                # an un-refined, optimistic COP. Heat: cap the PEAK, but never below the
-                # curve-valid temperature, so a thin demand estimate still keeps headroom
-                # to serve a spike instead of reverting to the over-banked first solve.
+                # Bound the re-solve to the temperatures the refined COP is valid for.
+                # The COP of step t is set at the DP's end-of-step temperature, so the
+                # re-solve must stay within 1 C of that trajectory at every step
+                # (below it for heating, above it for cooling); a single cap at the
+                # DP's peak would let it super-heat the steps the DP kept cold at a
+                # COP priced for the cold temperature. If demand outruns the DP's
+                # estimate the re-solve is infeasible and the static plan is kept.
                 if sense == "cool":
                     dp_level = float(traj[:n].min())  # coldest temperature the DP priced
-                    extra_constraints.append(e["predicted_temp"] >= dp_level - 1.0)
+                    extra_constraints.append(e["predicted_temp"][1:] >= traj[1:n] - 1.0)
                 else:
-                    src_cfg = self._get_load_source_config(hp["load_idx"])
-                    curve = src_cfg.get("heating_curve") or {}
-                    valid_temp = float(curve.get("max_supply", 70.0)) - float(hp["approach"])
                     dp_level = float(traj[:n].max())  # hottest temperature the DP priced
-                    extra_constraints.append(e["predicted_temp"] <= max(dp_level, valid_temp) + 1.0)
+                    extra_constraints.append(e["predicted_temp"][1:] <= traj[1:n] + 1.0)
                 refined = True
                 self.logger.info(
                     "DP COP refinement on tank '%s': COP inconsistency %.2f > %.2f - "
