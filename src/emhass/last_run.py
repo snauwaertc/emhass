@@ -28,6 +28,9 @@ ACTION_NAIVE_MPC_OPTIM = "naive-mpc-optim"
 
 # optim_status values whose plan is published and that count as a healthy run.
 # Shared with the /api/v1/plan gate in command_line.py so the two endpoints agree.
+# "Optimal_Inaccurate" is cvxpy's optimal_inaccurate, title-cased by the
+# optimizer; CPLEX returns it (e.g. at a time limit with a feasible solution).
+# HiGHS, the default, and Gurobi report a time-out as user_limit instead.
 OK_OPTIM_STATUSES = frozenset(
     {"Optimal", "Optimal_Inaccurate", "Optimal (Relaxed)", "Optimal (Incumbent)"}
 )
