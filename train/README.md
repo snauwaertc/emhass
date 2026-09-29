@@ -26,12 +26,14 @@ against master.
 | 6 | `pr/06-max-thermal-power` | 5 | `max_thermal_power` and the semi-continuous ON level | ready |
 | 7 | `pr/07-prior-heat-dead-zone` | 6 | `prior_heat` for the thermal_inertia dead zone (#1136) | after #1136 is answered |
 | 8 | `pr/08-dayahead-period-peak` | master | `current_period_peak` in dayahead-optim | design question: an issue first is safer |
-| 9 | `pr/09-relaxed-fallback` | 7 (+1b) | keep mutex in the fallback, keep time-limited incumbents, report both as ok | after `issue-relaxed-fallback.md` is answered |
+| 9 | `pr/09-relaxed-fallback` | 7 + the 4 commits of 1b | keep mutex in the fallback, keep time-limited incumbents, report both as ok | after `issue-relaxed-fallback.md` is answered |
 | 10 | `pr/10-thermal-onboarding-docs` | 7 | which model to use, migration guide, hybrid walkthrough (tested example) | ready once 2-7 are in |
 
 The review-round fix-on-fix commits of PRs 4, 5, 6 and 9 are squashed: PR 4
-has 3 commits, PR 5 3, PR 6 2 and PR 9 5 (one per proposal, the PR 1b commit
-and docs). Every commit passes the full suite, and each PR's final tree is unchanged.
+has 3 commits, PR 5 3, PR 6 2 and PR 9 8 (the four commits of PR 1b, one per
+proposal, and docs). PR 9 used to carry only the first PR 1b commit; it was
+rebuilt on 2026-09-29 on PR 7 plus all of PR 1b, so the two no longer conflict
+(the previous version is kept as `backup/pre-1b-rebase/pr09`). Every commit passes the full suite, and each PR's final tree is unchanged.
 The unsquashed history is kept on the fork as `backup/pre-squash/*` (the
 whole chain from PR 4 to PR 10 and the Pi branch as they were just before
 the squash). These branches are for reference only and never go upstream.

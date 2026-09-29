@@ -4,12 +4,10 @@
 > once the maintainer has chosen; each proposal is its own commit, so any of
 > them can be dropped.
 
-Stacked on <link to PR 7>. It also contains the `Optimal_Inaccurate` commit
-from <link to PR 1b> (identical patch), because the status reporting builds
-on the shared `OK_OPTIM_STATUSES`. If PR 1b is merged first, I rebase this PR
-onto it: that commit drops out, and the status list and the `optim_status`
-row in `publish_data.md` get a small merge (PR 1b's later commits touch the
-same lines).
+Stacked on <link to PR 7>. It also contains the four commits of <link to PR 1b>,
+because the status reporting builds on the shared `OK_OPTIM_STATUSES` and both
+PRs touch the same lines. Once PR 1b is merged, I rebase this PR onto master
+and those commits drop out.
 
 ### 1. Mutual exclusion survives the relaxed fallback
 
@@ -64,14 +62,13 @@ non-thermal configurations gives byte-identical result DataFrames.
 
 ### Commits
 
-One per proposal, so any of them can be dropped, plus the PR 1b commit and
-the docs:
+The four commits of PR 1b come first. After them, one commit per proposal,
+so any of them can be dropped, plus the docs:
 
 1. Mutual exclusion in the relaxed fallback.
 2. Time-limited incumbents.
-3. `Optimal_Inaccurate` as ok (identical to PR 1b's commit).
-4. Relaxed and incumbent plans as ok on the API.
-5. Docs.
+3. Relaxed and incumbent plans as ok on the API.
+4. Docs.
 
 ### Documentation
 
