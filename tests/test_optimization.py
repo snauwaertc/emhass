@@ -15388,6 +15388,15 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         # the buffer supplies through the transfer.
         self.assertGreater(float(np.mean(seen[0])), 0.5)
 
+    def test_dp_end_temperature_follows_the_refined_cop(self):
+        """The end-of-horizon temperature that gates the last step prices the heat
+        pump with its COP Parameter, so the DP re-solve uses the refined COP there
+        as in every other step."""
+        opt = self._dp_refinable_setup()
+        self._solve_default_inputs(opt)
+        temp_end, _ = opt._shared_tank_end["house"]
+        self.assertIn("cop_house_0", {p.name() for p in temp_end.parameters()})
+
     def _dp_refinable_setup(self):
         """A heating-curve HP on a zone tank with cop_solver=dp: the DP refinement
         always runs and produces a re-solve (prob2)."""

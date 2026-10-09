@@ -116,6 +116,11 @@ SHARED_TANK_START_RECOVERY_STEPS = 6
 # a tank that physically cannot catch up yet does not make the run infeasible.
 SHARED_TANK_START_RECOVERY_PENALTY = 1000.0
 
+# Highest COP a heat pump is given: utils.calculate_cop_heatpump and
+# utils.cop_from_tank_temperature both clip to it. Bounds a DP-refinable COP,
+# whose value is only known after the refinement.
+HEAT_PUMP_COP_MAX = 8.0
+
 
 class Optimization:
     r"""
@@ -4741,15 +4746,16 @@ class Optimization:
         heat_last = 0
         end_step_span = 0.0
         for j, cops in zip(load_ids, cop_arrays):
+            # A DP-refinable heat pump's COP is a cp.Parameter that the
+            # refinement re-values, so it stays symbolic here and its span is
+            # bounded by the COP clip rather than by today's value.
             if arrive >= 0:
                 heat_last = (
                     heat_last
-                    + float(cops[arrive])
-                    * self.vars["p_deferrable"][j][arrive]
-                    / 1000
-                    * self.time_step
+                    + cops[arrive] * self.vars["p_deferrable"][j][arrive] / 1000 * self.time_step
                 )
-            end_step_span += float(_nominal(j)) * float(np.max(cops)) / 1000 * self.time_step
+            cop_high = HEAT_PUMP_COP_MAX if isinstance(cops, cp.Parameter) else float(np.max(cops))
+            end_step_span += float(_nominal(j)) * cop_high / 1000 * self.time_step
         if loss_coefficient is not None:
             loss_last = (
                 loss_coefficient * (predicted_temp[-1] - outdoor_temp_arr[-1]) * self.time_step
